@@ -3,6 +3,7 @@ import os
 import sys
 from torch.testing._internal.jit_utils import JitTestCase
 from typing import List, Dict
+import cmath
 
 # Make the helper files in test/ importable
 pytorch_test_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -55,3 +56,16 @@ class TestComplex(JitTestCase):
         t2 = torch.tensor([0.4, 1.4j, 2.35])
 
         self.checkScript(fn, (t1, t2, 2))
+
+    def test_complex_unary_ops(self):
+        # def fn(a: complex, fn):
+        #     return [fn(a)]
+
+        # scripted = torch.jit.script(fn)
+        # , 'abs'
+        ops = ['log', 'exp', 'cos', 'sin', 'cos', 'sin', 'tan', 'asinh', 'acosh', 'atanh', 'sinh', 'cosh', 'tanh']
+        # for elem in ops:
+        #     op = getattr(cmath, elem)
+        #     for inp in [-0.4j, -0.1+2j, 2.3 + 4j, 3.7j, 1.4 + 0j]:
+        #        print(inp, elem, op(inp))
+        #        self.assertEqual(scripted(inp, elem), op(inp))
