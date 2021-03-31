@@ -16,6 +16,7 @@ from datetime import timedelta
 from functools import reduce
 from itertools import groupby, product
 from sys import platform
+import numpy
 
 import torch
 import torch.distributed as c10d
@@ -33,6 +34,7 @@ import torch.testing._internal.common_utils as common
 from torch import nn
 from torch._six import string_classes
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.checkpoint import checkpoint
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     requires_gloo,
@@ -45,6 +47,7 @@ from torch.testing._internal.common_distributed import (
     simple_sparse_reduce_tests,
     skip_if_win32,
     create_device,
+    with_nccl_blocking_wait,
 )
 from torch.testing._internal.common_utils import (
     TestCase,
@@ -759,16 +762,16 @@ class ProcessGroupGlooTest(MultiProcessTestCase):
 
     def opts(self, threads=2):
         opts = c10d.ProcessGroupGloo.Options()
-        opts.devices = [create_device(interface=LOOPBACK)]
         opts.timeout = 5.0
-        opts.threads = threads
+        opts._devices = [create_device(interface=LOOPBACK)]
+        opts._threads = threads
         return opts
 
     def test_multi_device_constructor(self):
         store = c10d.FileStore(self.file_name, self.world_size)
         opts = c10d.ProcessGroupGloo.Options()
         opts.timeout = 5.0
-        opts.devices = [
+        opts._devices = [
             create_device(interface=LOOPBACK),
             create_device(interface=LOOPBACK),
         ]
@@ -1715,7 +1718,7 @@ class ProcessGroupGlooTest(MultiProcessTestCase):
 
     def test_barrier_implies_wait(self):
         store = c10d.FileStore(self.file_name, self.world_size)
-        pg = c10d.ProcessGroupGloo(store, self.rank, self.world_size)
+        pg = c10d.ProcessGroupGloo(store, self.rank, self.world_size, self.opts())
 
         # Kick off allreduce operations
         size = (100, 100)
@@ -1738,7 +1741,7 @@ class ProcessGroupGlooTest(MultiProcessTestCase):
         pg = c10d._round_robin_process_groups(
             [
                 c10d.ProcessGroupGloo(
-                    c10d.PrefixStore(str(i), store), self.rank, self.world_size
+                    c10d.PrefixStore(str(i), store), self.rank, self.world_size, self.opts()
                 )
                 for i in range(num_process_groups)
             ]
@@ -1761,6 +1764,7 @@ class ProcessGroupGlooTest(MultiProcessTestCase):
                         c10d.PrefixStore("%s/%d" % (prefix, i), store),
                         self.rank,
                         self.world_size,
+                        self.opts()
                     )
                     for i in range(num)
                 ]
@@ -1814,6 +1818,10 @@ class ProcessGroupNCCLTest(TestCase):
         self.num_gpus = torch.cuda.device_count()
         if self.num_gpus < 2:
             raise unittest.SkipTest("NCCL test requires 2+ GPUs")
+
+        # NCCL_BLOCKING_WAIT overrides NCCL_ASYNC_ERROR_HANDLING hence tests
+        # that use NCCL_BLOCKING_WAIT will test it as expected.
+        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
 
     def tearDown(self):
         pass
@@ -2228,6 +2236,9 @@ class SparseGradientModule(nn.Module):
 class DistributedDataParallelTest(MultiProcessTestCase):
     def setUp(self):
         super(DistributedDataParallelTest, self).setUp()
+        # NCCL_BLOCKING_WAIT overrides NCCL_ASYNC_ERROR_HANDLING hence tests
+        # that use NCCL_BLOCKING_WAIT will test it as expected.
+        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
         if sys.platform == "win32":
             self._spawn_processes()
         else:
@@ -2385,7 +2396,7 @@ class DistributedDataParallelTest(MultiProcessTestCase):
     ):
         store = c10d.FileStore(self.file_name, self.world_size)
         options = c10d.ProcessGroupGloo.Options()
-        options.devices = [create_device(interface=LOOPBACK)]
+        options._devices = [create_device(interface=LOOPBACK)]
         process_group = c10d.ProcessGroupGloo(
             store, self.rank, self.world_size, options
         )
@@ -4190,6 +4201,125 @@ class DistributedDataParallelTest(MultiProcessTestCase):
                                      "set_to_none = {}, use_bucket_view = {}".format(try_set_to_none,
                                                                                      use_bucket_view))
 
+    # A list of tests for ddp with activation checkpointing
+    # when gradient_as_bucket_view=True, False.
+    # Most of the tests are referred to
+    # https://github.com/facebookresearch/fairscale/blob/master/tests/nn/pipe/test_checkpoint_ddp.py
+    class CheckpointOnceModule(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.l1 = nn.Linear(2000, 2000)
+            self.l2 = nn.Linear(2000, 2000)
+
+        def forward(self, inp):
+            x = self.l1(inp)
+            x = checkpoint(self.l2, x)
+            return x
+
+    class CheckpointTwiceModule(CheckpointOnceModule):
+        def __init__(self):
+            super().__init__()
+
+        def forward(self, inp):
+            x = self.l1(inp)
+            x = checkpoint(self.l2, x)
+            x = checkpoint(self.l2, x)
+            return x
+
+    def _test_ddp_checkpointing(self, checkpoint_once, process_group, use_bucket_view, find_unused_parameters=False):
+        # to reprodce the same training results
+        torch.cuda.set_device(self.rank)
+        torch.manual_seed(31415)
+        if checkpoint_once:
+            model = self.CheckpointOnceModule().cuda()
+        else:
+            model = self.CheckpointTwiceModule().cuda()
+        model = nn.parallel.DistributedDataParallel(model,
+                                                    bucket_cap_mb=1,
+                                                    gradient_as_bucket_view=use_bucket_view,
+                                                    device_ids=[self.rank],
+                                                    process_group=process_group,
+                                                    find_unused_parameters=find_unused_parameters)
+        input_tensor = torch.rand((64, 2000), device="cuda", requires_grad=True)
+        output_tensor = model(input_tensor)
+        output_tensor.sum().backward()
+        return model
+
+    # DDP works as expect when layer is checkpointed only once
+    @requires_nccl()
+    @skip_if_not_multigpu
+    def test_ddp_checkpointing_once(self):
+        store = c10d.FileStore(self.file_name, self.world_size)
+        process_group = c10d.ProcessGroupNCCL(store, self.rank, self.world_size)
+        for use_bucket_view in (True, False):
+            model = self._test_ddp_checkpointing(checkpoint_once=True,
+                                                 process_group=process_group,
+                                                 use_bucket_view=use_bucket_view)
+            norm = 0.0
+            for p in model.parameters():
+                self.assertTrue(p.grad is not None)
+                norm += p.grad.norm().item()
+            assert numpy.allclose(norm, 78053), norm
+
+    # DDP will fail when there are unused_parameters in the model
+    @requires_nccl()
+    @skip_if_not_multigpu
+    def test_ddp_checkpointing_unused_params(self):
+        store = c10d.FileStore(self.file_name, self.world_size)
+        process_group = c10d.ProcessGroupNCCL(store, self.rank, self.world_size)
+        for use_bucket_view in (True, False):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Expected to mark a variable ready only once.",
+            ):
+                model = self._test_ddp_checkpointing(checkpoint_once=True,
+                                                     process_group=process_group,
+                                                     use_bucket_view=use_bucket_view,
+                                                     find_unused_parameters=True)
+
+    # DDP will fail when the same layer is checkponted twice
+    @requires_nccl()
+    @skip_if_not_multigpu
+    def test_ddp_checkpointing_twice(self):
+        store = c10d.FileStore(self.file_name, self.world_size)
+        process_group = c10d.ProcessGroupNCCL(store, self.rank, self.world_size)
+        for use_bucket_view in (True, False):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Expected to mark a variable ready only once.",
+            ):
+                model = self._test_ddp_checkpointing(checkpoint_once=False,
+                                                     process_group=process_group,
+                                                     use_bucket_view=use_bucket_view,
+                                                     find_unused_parameters=True)
+
+    # DDP works as expected if there is weight sharing among layers
+    @requires_nccl()
+    @skip_if_not_multigpu
+    def test_ddp_checkpointing_weight_sharing(self):
+        store = c10d.FileStore(self.file_name, self.world_size)
+        process_group = c10d.ProcessGroupNCCL(store, self.rank, self.world_size)
+        torch.cuda.set_device(self.rank)
+        for use_bucket_view in (True, False):
+            torch.manual_seed(31415)
+            l1 = nn.Linear(2000, 2000)
+            l2 = nn.Linear(2000, 2000)
+            l1.weight = l2.weight
+            model = nn.Sequential(l1, l2).cuda()
+            model = nn.parallel.DistributedDataParallel(model,
+                                                        bucket_cap_mb=1,
+                                                        gradient_as_bucket_view=use_bucket_view,
+                                                        device_ids=[self.rank],
+                                                        process_group=process_group)
+            input_tensor = torch.rand((64, 2000), device="cuda", requires_grad=True)
+            output_tensor = checkpoint(model, input_tensor)
+            output_tensor.sum().backward()
+            norm = 0.0
+            for p in model.parameters():
+                self.assertTrue(p.grad is not None)
+                norm += p.grad.norm().item()
+            assert numpy.allclose(norm, 57004), norm
+
 
 class ReducerModule(nn.Module):
     def __init__(self):
@@ -4417,6 +4547,9 @@ class NcclErrorHandlingTest(MultiProcessTestCase):
             self.test_nccl_errors_blocking_sigterm.__wrapped__,
             self.test_nccl_errors_blocking_nonzero_exit.__wrapped__,
         ]
+        # NCCL_BLOCKING_WAIT overrides NCCL_ASYNC_ERROR_HANDLING hence tests
+        # that use NCCL_BLOCKING_WAIT will test it as expected.
+        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
         self._fork_processes()
 
     def tearDown(self):
@@ -4445,6 +4578,11 @@ class NcclErrorHandlingTest(MultiProcessTestCase):
     @requires_nccl_version(2400, "Need NCCL 2.4+ for error checking")
     @skip_if_lt_x_gpu(3)
     def test_nccl_errors_nonblocking(self):
+        # Note: we unset and restore NCCL_ASYNC_ERROR_HANDLING for this test
+        # since test_c10d runs with async error handling by default, but this
+        # tests behavior when it is not enabled.
+        prev_nccl_async_error_handling = os.environ.get("NCCL_ASYNC_ERROR_HANDLING", None)
+        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "0"
         store = c10d.FileStore(self.file_name, self.world_size)
         process_group = c10d.ProcessGroupNCCL(store, self.rank, self.world_size)
         process_group.allreduce(torch.rand(10).cuda(self.rank))
@@ -4463,8 +4601,10 @@ class NcclErrorHandlingTest(MultiProcessTestCase):
             t.join(int(get_timeout(self.id()) / 5))
             self.assertTrue(t.is_alive())
 
+        if prev_nccl_async_error_handling is not None:
+            os.environ["NCCL_ASYNC_ERROR_HANDLING"] = prev_nccl_async_error_handling
+
     def _test_nccl_errors_blocking(self, func):
-        os.environ["NCCL_BLOCKING_WAIT"] = "1"
         store = c10d.FileStore(self.file_name, self.world_size)
         process_group = c10d.ProcessGroupNCCL(
             store,
@@ -4493,41 +4633,46 @@ class NcclErrorHandlingTest(MultiProcessTestCase):
             # Now verify communicators on this rank have been aborted by the watchdog thread.
             self._wait_for_comm_abort(process_group)
 
+    @with_nccl_blocking_wait
     @requires_nccl()
     @requires_nccl_version(2400, "Need NCCL 2.4+ for error checking")
     @skip_if_lt_x_gpu(3)
     def test_nccl_errors_blocking_clean_exit(self):
         self._test_nccl_errors_blocking(lambda: sys.exit(0))
 
+    @with_nccl_blocking_wait
     @requires_nccl()
     @requires_nccl_version(2400, "Need NCCL 2.4+ for error checking")
     @skip_if_lt_x_gpu(3)
     def test_nccl_errors_blocking_nonzero_exit(self):
         self._test_nccl_errors_blocking(lambda: sys.exit(1))
 
+    @with_nccl_blocking_wait
     @requires_nccl()
     @requires_nccl_version(2400, "Need NCCL 2.4+ for error checking")
     @skip_if_lt_x_gpu(3)
     def test_nccl_errors_blocking_abort(self):
         self._test_nccl_errors_blocking(lambda: os.abort())
 
+    @with_nccl_blocking_wait
     @requires_nccl()
     @requires_nccl_version(2400, "Need NCCL 2.4+ for error checking")
     @skip_if_lt_x_gpu(3)
     def test_nccl_errors_blocking_sigkill(self):
         self._test_nccl_errors_blocking(lambda: os.kill(os.getpid(), signal.SIGKILL))
 
+    @with_nccl_blocking_wait
     @requires_nccl()
     @requires_nccl_version(2400, "Need NCCL 2.4+ for error checking")
     @skip_if_lt_x_gpu(3)
     def test_nccl_errors_blocking_sigterm(self):
         self._test_nccl_errors_blocking(lambda: os.kill(os.getpid(), signal.SIGTERM))
 
+    @with_nccl_blocking_wait
     @requires_nccl()
     @requires_nccl_version(2400, "Need NCCL 2.4+ for error checking")
     @skip_if_lt_x_gpu(3)
     def test_nccl_blocking_wait_with_barrier(self):
-        os.environ["NCCL_BLOCKING_WAIT"] = "1"
         store = c10d.FileStore(self.file_name, self.world_size)
         process_group = c10d.ProcessGroupNCCL(
             store,
@@ -4569,11 +4714,11 @@ class NcclErrorHandlingTest(MultiProcessTestCase):
                     raise e
             time.sleep(1)
 
+    @with_nccl_blocking_wait
     @requires_nccl()
     @skip_if_lt_x_gpu(3)
     def test_nccl_timeout(self):
         store = c10d.FileStore(self.file_name, self.world_size)
-        os.environ["NCCL_BLOCKING_WAIT"] = "1"
 
         # Initialize process_group.
         timeout = 1
@@ -4602,6 +4747,9 @@ class NcclErrorHandlingTest(MultiProcessTestCase):
 class CommTest(MultiProcessTestCase):
     def setUp(self):
         super(CommTest, self).setUp()
+        # NCCL_BLOCKING_WAIT overrides NCCL_ASYNC_ERROR_HANDLING hence tests
+        # that use NCCL_BLOCKING_WAIT will test it as expected.
+        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
         if sys.platform == "win32":
             self._spawn_processes()
         else:
@@ -4668,7 +4816,7 @@ class CommTest(MultiProcessTestCase):
     def test_broadcast_coalesced_gloo_cuda(self):
         store = c10d.FileStore(self.file_name, self.world_size)
         options = c10d.ProcessGroupGloo.Options()
-        options.devices = [create_device(interface=LOOPBACK)]
+        options._devices = [create_device(interface=LOOPBACK)]
         process_group = c10d.ProcessGroupGloo(
             store, self.rank, self.world_size, options
         )
@@ -4681,7 +4829,7 @@ class CommTest(MultiProcessTestCase):
     def test_broadcast_coalesced_gloo_cpu(self):
         store = c10d.FileStore(self.file_name, self.world_size)
         options = c10d.ProcessGroupGloo.Options()
-        options.devices = [create_device(interface=LOOPBACK)]
+        options._devices = [create_device(interface=LOOPBACK)]
         process_group = c10d.ProcessGroupGloo(
             store, self.rank, self.world_size, options
         )
@@ -4689,6 +4837,90 @@ class CommTest(MultiProcessTestCase):
         ranks = list(range(self.world_size))
         for root_rank in ranks:
             self._test_broadcast_coalesced(process_group, device, root_rank)
+
+    @requires_gloo()
+    def test_pass_gloo_options(self):
+        pg_opts = c10d.ProcessGroupGloo.Options()
+        pg_opts.timeout = timedelta(seconds=10)
+        pg_opts._devices = [create_device(interface=LOOPBACK)]
+        pg_opts._threads = 2
+
+        store = c10d.FileStore(self.file_name, self.world_size)
+
+        dist.init_process_group(
+            "gloo",
+            world_size=self.world_size,
+            rank=self.rank,
+            store=store,
+            pg_options=pg_opts
+        )
+
+        default_pg = c10d.distributed_c10d._get_default_group()
+
+        # Test properly set devices on options if user don't set devices
+        no_device_thread_pg_opts = c10d.ProcessGroupGloo.Options(timeout=timedelta(seconds=10))
+        no_device_thread_pg = dist.new_group([0, 1], pg_options=no_device_thread_pg_opts)
+        self.assertTrue(len(no_device_thread_pg.options._devices) != 0)
+        # ensure created pg have the correct timeout set instead of default time out
+        self.assertEqual(no_device_thread_pg.options.timeout, timedelta(seconds=10))
+
+        # Test if user pass in Options, set threads, but not set devices, should error out
+        no_device_pg_opts = c10d.ProcessGroupGloo.Options(timeout=timedelta(seconds=10))
+        no_device_pg_opts._threads = 4
+
+        with self.assertRaisesRegex(
+            RuntimeError, "threads and devices must be passed in together"
+        ):
+            no_device_pg = dist.new_group([0, 1], pg_options=no_device_pg_opts)
+
+        dist.destroy_process_group(default_pg)
+        self.assertFalse(dist.is_initialized())
+
+
+    @requires_gloo()
+    def test_pass_gloo_options_and_timeout(self):
+        pg_opts = c10d.ProcessGroupGloo.Options()
+        pg_opts.timeout = timedelta(seconds=10)
+
+        store = c10d.FileStore(self.file_name, self.world_size)
+        # Test timeout and pg_options both set, should error out
+        with self.assertRaisesRegex(
+            RuntimeError, "timeout value defined in pg_options are conflicting"
+        ):
+            dist.init_process_group(
+                "gloo",
+                world_size=self.world_size,
+                rank=self.rank,
+                store=store,
+                timeout=timedelta(20),
+                pg_options=pg_opts
+            )
+
+    @requires_nccl()
+    @skip_if_lt_x_gpu(2)
+    def test_pass_nccl_options_high_priority_stream(self):
+        pg_opts = c10d.ProcessGroupNCCL.Options()
+        pg_opts.is_high_priority_stream = True
+
+        store = c10d.FileStore(self.file_name, self.world_size)
+        # Test init_process_group accepts options
+        dist.init_process_group(
+            "nccl",
+            world_size=self.world_size,
+            rank=self.rank,
+            store=store,
+            pg_options=pg_opts
+        )
+
+        # Test with new_group
+        pg = c10d.new_group([0, 1], pg_options=pg_opts)
+        # test if the process group constructed with high priority stream
+        self.assertTrue(pg.options.is_high_priority_stream)
+        # test the process group works as expected
+        t = torch.tensor([self.rank + 1] * 10).cuda(self.rank)
+        pg.allreduce(t).wait()
+        expected_tensor = torch.tensor([3] * 10).cuda(self.rank)
+        self.assertEqual(expected_tensor, t)
 
     @requires_nccl()
     @skip_if_lt_x_gpu(4)
