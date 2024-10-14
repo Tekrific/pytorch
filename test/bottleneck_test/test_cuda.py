@@ -1,10 +1,12 @@
+# Owner(s): ["module: unknown"]
+
 import torch
 import torch.nn as nn
 
 
 class Model(nn.Module):
-    def __init__(self):
-        super(Model, self).__init__()
+    def __init__(self) -> None:
+        super().__init__()
         self.linear = nn.Linear(20, 20)
 
     def forward(self, input):
@@ -23,5 +25,5 @@ def main():
         optimizer.step()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

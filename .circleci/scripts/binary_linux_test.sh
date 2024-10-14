@@ -1,42 +1,59 @@
 #!/bin/bash
 
-source /home/circleci/project/env
-cat >/home/circleci/project/ci_test_script.sh <<EOL
+OUTPUT_SCRIPT=${OUTPUT_SCRIPT:-/home/circleci/project/ci_test_script.sh}
+
+# only source if file exists
+if [[ -f /home/circleci/project/env ]]; then
+  source /home/circleci/project/env
+fi
+cat >"${OUTPUT_SCRIPT}" <<EOL
 # =================== The following code will be executed inside Docker container ===================
 set -eux -o pipefail
+
+retry () {
+    "\$@"  || (sleep 1 && "\$@") || (sleep 2 && "\$@")
+}
+
+# Source binary env file here if exists
+if [[ -e "${BINARY_ENV_FILE:-/nofile}" ]]; then
+  source "${BINARY_ENV_FILE:-/nofile}"
+fi
 
 python_nodot="\$(echo $DESIRED_PYTHON | tr -d m.u)"
 
 # Set up Python
 if [[ "$PACKAGE_TYPE" == conda ]]; then
-  # There was a bug that was introduced in conda-package-handling >= 1.6.1 that makes archives
-  # above a certain size fail out when attempting to extract
-  # see: https://github.com/conda/conda-package-handling/issues/71
-  conda install -y conda-package-handling=1.6.0
   retry conda create -qyn testenv python="$DESIRED_PYTHON"
   source activate testenv >/dev/null
 elif [[ "$PACKAGE_TYPE" != libtorch ]]; then
   python_path="/opt/python/cp\$python_nodot-cp\${python_nodot}"
-  # Prior to Python 3.8 paths were suffixed with an 'm'
-  if [[ -d  "\${python_path}/bin" ]]; then
-    export PATH="\${python_path}/bin:\$PATH"
-  elif [[ -d "\${python_path}m/bin" ]]; then
-    export PATH="\${python_path}m/bin:\$PATH"
+  if [[ "\$python_nodot" = *t ]]; then
+    python_digits="\$(echo $DESIRED_PYTHON | tr -cd [:digit:])"
+    python_path="/opt/python/cp\$python_digits-cp\${python_digits}t"
   fi
+  export PATH="\${python_path}/bin:\$PATH"
 fi
 
 EXTRA_CONDA_FLAGS=""
 NUMPY_PIN=""
+PROTOBUF_PACKAGE="defaults::protobuf"
+
+if [[ "\$python_nodot" = *310* ]]; then
+  # There's an issue with conda channel priority where it'll randomly pick 1.19 over 1.20
+  # we set a lower boundary here just to be safe
+  NUMPY_PIN=">=1.21.2"
+  PROTOBUF_PACKAGE="protobuf>=3.19.0"
+fi
+
 if [[ "\$python_nodot" = *39* ]]; then
-  EXTRA_CONDA_FLAGS="-c=conda-forge"
   # There's an issue with conda channel priority where it'll randomly pick 1.19 over 1.20
   # we set a lower boundary here just to be safe
   NUMPY_PIN=">=1.20"
 fi
 
-if [[ "$DESIRED_CUDA" == "cu112" ]]; then
-  EXTRA_CONDA_FLAGS="-c=conda-forge"
-fi
+# Move debug wheels out of the package dir so they don't get installed
+mkdir -p /tmp/debug_final_pkgs
+mv /final_pkgs/debug-*.zip /tmp/debug_final_pkgs || echo "no debug packages to move"
 
 # Install the package
 # These network calls should not have 'retry's because they are installing
@@ -44,7 +61,14 @@ fi
 # TODO there is duplicated and inconsistent test-python-env setup across this
 #   file, builder/smoke_test.sh, and builder/run_tests.sh, and also in the
 #   conda build scripts themselves. These should really be consolidated
-pkg="/final_pkgs/\$(ls /final_pkgs)"
+# Pick only one package of multiple available (which happens as result of workflow re-runs)
+pkg="/final_pkgs/\$(ls -1 /final_pkgs|sort|tail -1)"
+if [[ "\$PYTORCH_BUILD_VERSION" == *dev* ]]; then
+    CHANNEL="nightly"
+else
+    CHANNEL="test"
+fi
+
 if [[ "$PACKAGE_TYPE" == conda ]]; then
   (
     # For some reason conda likes to re-activate the conda environment when attempting this install
@@ -54,29 +78,36 @@ if [[ "$PACKAGE_TYPE" == conda ]]; then
     set +u
     retry conda install \${EXTRA_CONDA_FLAGS} -yq \
       "numpy\${NUMPY_PIN}" \
-      future \
       mkl>=2018 \
       ninja \
-      dataclasses \
+      sympy>=1.12 \
       typing-extensions \
-      defaults::protobuf \
-      six
+      ${PROTOBUF_PACKAGE}
     if [[ "$DESIRED_CUDA" == 'cpu' ]]; then
       retry conda install -c pytorch -y cpuonly
     else
-      # DESIRED_CUDA is in format cu90 or cu102
-      if [[ "${#DESIRED_CUDA}" == 4 ]]; then
-        cu_ver="${DESIRED_CUDA:2:1}.${DESIRED_CUDA:3}"
-      else
-        cu_ver="${DESIRED_CUDA:2:2}.${DESIRED_CUDA:4}"
-      fi
-      retry conda install \${EXTRA_CONDA_FLAGS} -yq -c nvidia -c pytorch "cudatoolkit=\${cu_ver}"
+      cu_ver="${DESIRED_CUDA:2:2}.${DESIRED_CUDA:4}"
+      CUDA_PACKAGE="pytorch-cuda"
+      retry conda install \${EXTRA_CONDA_FLAGS} -yq -c nvidia -c "pytorch-\${CHANNEL}" "pytorch-cuda=\${cu_ver}"
     fi
     conda install \${EXTRA_CONDA_FLAGS} -y "\$pkg" --offline
   )
 elif [[ "$PACKAGE_TYPE" != libtorch ]]; then
-  pip install "\$pkg"
-  retry pip install -q future numpy protobuf typing-extensions six
+  if [[ "\$BUILD_ENVIRONMENT" != *s390x* ]]; then
+    if [[ "$USE_SPLIT_BUILD" == "true" ]]; then
+      pkg_no_python="$(ls -1 /final_pkgs/torch_no_python* | sort |tail -1)"
+      pkg_torch="$(ls -1 /final_pkgs/torch-* | sort |tail -1)"
+      # todo: after folder is populated use the pypi_pkg channel instead
+      pip install "\$pkg_no_python" "\$pkg_torch" --index-url "https://download.pytorch.org/whl/\${CHANNEL}/${DESIRED_CUDA}_pypi_pkg"
+      retry pip install -q numpy protobuf typing-extensions
+    else
+      pip install "\$pkg" --index-url "https://download.pytorch.org/whl/\${CHANNEL}/${DESIRED_CUDA}"
+      retry pip install -q numpy protobuf typing-extensions
+    fi
+  else
+    pip install "\$pkg"
+    retry pip install -q numpy protobuf typing-extensions
+  fi
 fi
 if [[ "$PACKAGE_TYPE" == libtorch ]]; then
   pkg="\$(ls /final_pkgs/*-latest.zip)"
@@ -87,9 +118,17 @@ fi
 # Test the package
 /builder/check_binary.sh
 
+if [[ "\$GPU_ARCH_TYPE" != *s390x* && "\$GPU_ARCH_TYPE" != *xpu* && "\$GPU_ARCH_TYPE" != *rocm*  && "$PACKAGE_TYPE" != libtorch ]]; then
+  # Exclude s390, xpu, rocm and libtorch builds from smoke testing
+  python /builder/test/smoke_test/smoke_test.py --package=torchonly --torch-compile-check disabled
+fi
+
+# Clean temp files
+cd /builder && git clean -ffdx
+
 # =================== The above code will be executed inside Docker container ===================
 EOL
 echo
 echo
 echo "The script that will run in the next step is:"
-cat /home/circleci/project/ci_test_script.sh
+cat "${OUTPUT_SCRIPT}"

@@ -27,13 +27,15 @@ namespace datasets {
 ///
 /// Note that when subclassing a from `StatefulDataset<Self, T>`, the return
 /// type of `get_batch()`, which the subclass must override, will be
-/// `optional<T>` (i.e. the type specified in the `StatefulDataset` specialization is automatically boxed into an `optional` for the dataset's `BatchType`).
+/// `optional<T>` (i.e. the type specified in the `StatefulDataset`
+/// specialization is automatically boxed into an `optional` for the dataset's
+/// `BatchType`).
 template <
     typename Self,
     typename Batch = std::vector<Example<>>,
     typename BatchRequest = size_t>
 class StatefulDataset
-    : public BatchDataset<Self, optional<Batch>, BatchRequest> {
+    : public BatchDataset<Self, std::optional<Batch>, BatchRequest> {
  public:
   /// Resets internal state of the dataset.
   virtual void reset() = 0;

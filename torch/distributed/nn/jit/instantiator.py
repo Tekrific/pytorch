@@ -1,14 +1,15 @@
 #!/usr/bin/python3
+# mypy: allow-untyped-defs
 import importlib
 import logging
 import os
 import sys
 import tempfile
+from typing import Optional
 
 import torch
-from typing import Optional
 from torch.distributed.nn.jit.templates.remote_module_template import (
-    REMOTE_MODULE_TEMPLATE,
+    get_remote_module_template,
 )
 
 
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 _FILE_PREFIX = "_remote_module_"
 _TEMP_DIR = tempfile.TemporaryDirectory()
 INSTANTIATED_TEMPLATE_DIR_PATH = _TEMP_DIR.name
-logger.info(f"Created a temporary directory at {INSTANTIATED_TEMPLATE_DIR_PATH}")
+logger.info("Created a temporary directory at %s", INSTANTIATED_TEMPLATE_DIR_PATH)
 sys.path.append(INSTANTIATED_TEMPLATE_DIR_PATH)
 
 
@@ -31,9 +32,7 @@ def get_arg_return_types_from_interface(module_interface):
     module_interface_c = cu.get_interface(qualified_name)
     assert (
         "forward" in module_interface_c.getMethodNames()
-    ), "Expect forward in interface methods, while it has {}".format(
-        module_interface_c.getMethodNames()
-    )
+    ), f"Expect forward in interface methods, while it has {module_interface_c.getMethodNames()}"
     method_schema = module_interface_c.getMethod("forward")
 
     arg_str_list = []
@@ -43,12 +42,10 @@ def get_arg_return_types_from_interface(module_interface):
         arg_str_list.append(argument.name)
 
         if argument.has_default_value():
-            default_value_str = " = {}".format(argument.default_value)
+            default_value_str = f" = {argument.default_value}"
         else:
             default_value_str = ""
-        arg_type_str = "{name}: {type}{default_value}".format(
-            name=argument.name, type=argument.type, default_value=default_value_str
-        )
+        arg_type_str = f"{argument.name}: {argument.type}{default_value_str}"
         arg_type_str_list.append(arg_type_str)
 
     arg_str_list = arg_str_list[1:]  # Remove "self".
@@ -67,20 +64,24 @@ def get_arg_return_types_from_interface(module_interface):
 def _write(out_path, text):
     old_text: Optional[str]
     try:
-        with open(out_path, "r") as f:
+        with open(out_path) as f:
             old_text = f.read()
-    except IOError:
+    except OSError:
         old_text = None
     if old_text != text:
         with open(out_path, "w") as f:
-            logger.info("Writing {}".format(out_path))
+            logger.info("Writing %s", out_path)
             f.write(text)
     else:
-        logger.info("Skipped writing {}".format(out_path))
+        logger.info("Skipped writing %s", out_path)
 
 
-def _do_instantiate_remote_module_template(generated_module_name, str_dict):
-    generated_code_text = REMOTE_MODULE_TEMPLATE.format(**str_dict)
+def _do_instantiate_remote_module_template(
+    generated_module_name, str_dict, enable_moving_cpu_tensors_to_cuda
+):
+    generated_code_text = get_remote_module_template(
+        enable_moving_cpu_tensors_to_cuda
+    ).format(**str_dict)
     out_path = os.path.join(
         INSTANTIATED_TEMPLATE_DIR_PATH, f"{generated_module_name}.py"
     )
@@ -96,7 +97,9 @@ def _do_instantiate_remote_module_template(generated_module_name, str_dict):
     return generated_module
 
 
-def instantiate_scriptable_remote_module_template(module_interface_cls):
+def instantiate_scriptable_remote_module_template(
+    module_interface_cls, enable_moving_cpu_tensors_to_cuda=True
+):
     if not getattr(module_interface_cls, "__torch_script_interface__", False):
         raise ValueError(
             f"module_interface_cls {module_interface_cls} must be a type object decorated by "
@@ -104,9 +107,9 @@ def instantiate_scriptable_remote_module_template(module_interface_cls):
         )
 
     # Generate the template instance name.
-    module_interface_cls_name = torch._jit_internal._qualified_name(module_interface_cls).replace(
-        ".", "_"
-    )
+    module_interface_cls_name = torch._jit_internal._qualified_name(
+        module_interface_cls
+    ).replace(".", "_")
     generated_module_name = f"{_FILE_PREFIX}{module_interface_cls_name}"
 
     # Generate type annotation strs.
@@ -130,11 +133,13 @@ def instantiate_scriptable_remote_module_template(module_interface_cls):
         kwargs=kwargs_str,
         jit_script_decorator="@torch.jit.script",
     )
-    return _do_instantiate_remote_module_template(generated_module_name, str_dict)
+    return _do_instantiate_remote_module_template(
+        generated_module_name, str_dict, enable_moving_cpu_tensors_to_cuda
+    )
 
 
 def instantiate_non_scriptable_remote_module_template():
-    generated_module_name = f"{_FILE_PREFIX}non_sriptable"
+    generated_module_name = f"{_FILE_PREFIX}non_scriptable"
     str_dict = dict(
         assign_module_interface_cls="module_interface_cls = None",
         args="*args",
@@ -144,4 +149,6 @@ def instantiate_non_scriptable_remote_module_template():
         arrow_and_future_return_type="",
         jit_script_decorator="",
     )
-    return _do_instantiate_remote_module_template(generated_module_name, str_dict)
+    # For a non-scriptable template, always enable moving CPU tensors to a cuda device,
+    # because there is no syntax limitation on the extra handling caused by the script.
+    return _do_instantiate_remote_module_template(generated_module_name, str_dict, True)

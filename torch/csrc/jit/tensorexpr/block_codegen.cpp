@@ -4,20 +4,20 @@
 #include <torch/csrc/jit/tensorexpr/analysis.h>
 #include <torch/csrc/jit/tensorexpr/eval.h>
 #include <torch/csrc/jit/tensorexpr/exceptions.h>
-#include <torch/csrc/jit/tensorexpr/execution_counter.h>
 #include <torch/csrc/jit/tensorexpr/ir_simplifier.h>
 
-namespace torch {
-namespace jit {
-namespace tensorexpr {
+namespace torch::jit::tensorexpr {
 
-DEFINE_TRIGGER(block_codegen_created);
-std::string blockDtypeCppString(const Dtype& dtype) {
+static std::string blockDtypeCppString(const Dtype& dtype) {
   switch (dtype.scalar_type()) {
     case ScalarType::Bool:
       return "1";
+    // NOLINTNEXTLINE(bugprone-branch-clone)
     case ScalarType::Half:
       return "2";
+    case ScalarType::BFloat16:
+      return "2";
+    // NOLINTNEXTLINE(bugprone-branch-clone)
     case ScalarType::Char:
       return "1";
     case ScalarType::Byte:
@@ -33,8 +33,7 @@ std::string blockDtypeCppString(const Dtype& dtype) {
   }
 }
 
-bool BlockAnalysis::areBufsInMap(
-    const std::unordered_set<const Buf*>& bufs) const {
+bool BlockAnalysis::areBufsInMap(const std::unordered_set<BufPtr>& bufs) const {
   for (auto const& arg : bufs) {
     auto got = map_input_to_tensor_bufs_.find(arg->name_hint());
     if (got == map_input_to_tensor_bufs_.end()) {
@@ -44,7 +43,7 @@ bool BlockAnalysis::areBufsInMap(
   return true;
 }
 
-const Buf* BlockAnalysis::getMultiDimBuf(const Buf* buf) const {
+BufPtr BlockAnalysis::getMultiDimBuf(const BufPtr& buf) const {
   auto input_ = map_input_to_tensor_bufs_.find(buf->name_hint());
   if (input_ != map_input_to_tensor_bufs_.end()) {
     return input_->second;
@@ -53,7 +52,7 @@ const Buf* BlockAnalysis::getMultiDimBuf(const Buf* buf) const {
   }
 }
 
-std::string BlockAnalysis::getInputName(const Buf* buf) const {
+std::string BlockAnalysis::getInputName(const BufPtr& buf) const {
   auto input_ = map_input_to_tensor_bufs_.find(buf->name_hint());
   if (input_ != map_input_to_tensor_bufs_.end()) {
     return input_->second->name_hint();
@@ -62,23 +61,23 @@ std::string BlockAnalysis::getInputName(const Buf* buf) const {
   }
 }
 
-void BlockAnalysis::visit(const Store* v) {
+void BlockAnalysis::visit(const StorePtr& v) {
   store_targets_.insert(v->buf());
   v->value()->accept(this);
 }
 
-void BlockAnalysis::visit(const Load* v) {
+void BlockAnalysis::visit(const LoadPtr& v) {
   loads_.insert(v->buf());
 }
 
-void BlockAnalysis::visit(const For* v) {
+void BlockAnalysis::visit(const ForPtr& v) {
   const LoopOptions& loop_options = v->loop_options();
   if (loop_options.is_gpu_block_index()) {
     map_input_to_tensor_bufs_ = loop_options.get_buffer_mapping();
     v->body()->accept(this);
   } else if (loop_options.is_gpu_thread_index()) {
     auto block_size = v->stop();
-    block_size_ = dynamic_cast<const IntImm*>(block_size)->value();
+    block_size_ = *intValue(block_size);
     v->body()->accept(this);
   } else {
     IRVisitor::visit(v);
@@ -86,32 +85,32 @@ void BlockAnalysis::visit(const For* v) {
 }
 
 // For both Add, Mul we only print out the opening
-// paranthesis. This behavior is to handle blocks add Op
-// where c=a+b becomes add(a, b, c). The closing paran is
+// parenthesis. This behavior is to handle blocks add Op
+// where c=a+b becomes add(a, b, c). The closing parenthesis is
 // added in the store statement.
 // TODO: When handling fused ops d = a + b + c, the correct
 // way would be to mutate the expression to Block version and print.
 
-void BlockPrinter::visit(const Add* v) {
+void BlockPrinter::visit(const AddPtr& v) {
   emitIndent();
   os() << "add(";
   v->lhs()->accept(this);
   v->rhs()->accept(this);
 }
 
-void BlockPrinter::visit(const Mul* v) {
+void BlockPrinter::visit(const MulPtr& v) {
   emitIndent();
   os() << "mul(";
   v->lhs()->accept(this);
   v->rhs()->accept(this);
 }
 
-void BlockPrinter::visit(const For* v) {
+void BlockPrinter::visit(const ForPtr& v) {
   const LoopOptions& loop_options = v->loop_options();
 
   auto buf_reads = block_analysis_->loads();
   auto buf_writes = block_analysis_->stores();
-  std::unordered_set<const Buf*> bufs(buf_reads.begin(), buf_reads.end());
+  std::unordered_set<BufPtr> bufs(buf_reads.begin(), buf_reads.end());
   bufs.insert(buf_writes.begin(), buf_writes.end());
 
   if (loop_options.is_gpu_block_index()) {
@@ -122,7 +121,7 @@ void BlockPrinter::visit(const For* v) {
     PrintArguments(bufs);
 
     emitIndent();
-    os() << "compute {" << std::endl;
+    os() << "compute {" << '\n';
 
     PrintReshapeInfo(bufs);
 
@@ -130,16 +129,16 @@ void BlockPrinter::visit(const For* v) {
     PrintLoop(bufs, true);
     v->body()->accept(this);
 
-    os() << std::endl;
+    os() << '\n';
     emitIndent();
     PrintReshapeInfo(buf_writes, true); // print reverse reshape
     os() << "}";
-    os() << std::endl;
+    os() << '\n';
   } else if (loop_options.is_gpu_thread_index()) {
     PrintDMAs(buf_reads);
     PrintLoop(buf_reads, false);
     v->body()->accept(this);
-    os() << std::endl;
+    os() << '\n';
     PrintAdjustBuffers(buf_reads);
 
   } else {
@@ -147,10 +146,10 @@ void BlockPrinter::visit(const For* v) {
   }
 }
 
-void BlockPrinter::PrintTensorInfo(const std::unordered_set<const Buf*>& bufs) {
+void BlockPrinter::PrintTensorInfo(const std::unordered_set<BufPtr>& bufs) {
   os() << "tensors {";
-  for (const auto& buf : bufs) {
-    os() << std::endl;
+  for (auto& buf : bufs) {
+    os() << '\n';
     emitIndent();
     emitIndent();
     auto num_dims = block_analysis_->getMultiDimBuf(buf)->dims().size();
@@ -163,8 +162,8 @@ void BlockPrinter::PrintTensorInfo(const std::unordered_set<const Buf*>& bufs) {
     os() << "}";
   }
 
-  for (const auto& buf : bufs) {
-    os() << std::endl;
+  for (auto& buf : bufs) {
+    os() << '\n';
     emitIndent();
     emitIndent();
     auto num_dims = block_analysis_->getMultiDimBuf(buf)->dims().size();
@@ -175,54 +174,53 @@ void BlockPrinter::PrintTensorInfo(const std::unordered_set<const Buf*>& bufs) {
     os() << "}"
          << " // flattened tensor";
   }
-  os() << std::endl;
+  os() << '\n';
   emitIndent();
-  os() << "}" << std::endl << std::endl;
+  os() << "}" << '\n' << '\n';
 }
 
-void BlockPrinter::PrintArguments(const std::unordered_set<const Buf*>& bufs) {
-  for (const auto& buf : bufs) {
+void BlockPrinter::PrintArguments(const std::unordered_set<BufPtr>& bufs) {
+  for (auto& buf : bufs) {
     auto multidimbuf = block_analysis_->getMultiDimBuf(buf);
     auto num_dims = multidimbuf->dims().size();
 
     // The dims for the multi-dim tensors
     for (unsigned long d = 0; d < num_dims; d++) {
-      auto dim_val = dynamic_cast<const IntImm*>(multidimbuf->dim(d));
-      this->dim_values_map.emplace(this->dim_names[d], dim_val->value());
+      auto dim_val = *intValue(multidimbuf->dim(d));
+      this->dim_values_map.emplace(this->dim_names[d], dim_val);
     }
 
     // The dimensions for the flattened tensors
-    auto val = dynamic_cast<const IntImm*>(buf->dim(0));
+    auto val = *intValue(buf->dim(0));
     if (block_analysis_->is_buf_store_target(buf)) {
-      this->dim_values_map.emplace(
-          this->flat_dim_names[num_dims - 1], val->value());
+      this->dim_values_map.emplace(this->flat_dim_names[num_dims - 1], val);
     }
   }
 
   emitIndent();
-  os() << "arguments {" << std::endl;
+  os() << "arguments {" << '\n';
 
   for (auto const& arg : this->dim_values_map) {
     emitIndent();
-    os() << "var " << arg.first << " = " << arg.second << std::endl;
+    os() << "var " << arg.first << " = " << arg.second << '\n';
   }
 
   emitIndent();
   emitIndent();
   auto blck_sz = block_analysis_->block_size();
-  os() << "var bs_N = " << blck_sz << std::endl;
+  os() << "var bs_N = " << blck_sz << '\n';
   emitIndent();
   emitIndent();
-  os() << "var bs_DPE = " << blck_sz << std::endl;
+  os() << "var bs_DPE = " << blck_sz << '\n';
   emitIndent();
-  os() << "}" << std::endl << std::endl;
+  os() << "}" << '\n' << '\n';
 }
 
-void BlockPrinter::PrintBufferInfo(const std::unordered_set<const Buf*>& bufs) {
+void BlockPrinter::PrintBufferInfo(const std::unordered_set<BufPtr>& bufs) {
   emitIndent();
   os() << "buffers {";
-  for (const auto& read : bufs) {
-    os() << std::endl;
+  for (auto& read : bufs) {
+    os() << '\n';
     emitIndent();
     emitIndent();
     os() << block_analysis_->getFlatInputName(read) << " = ";
@@ -230,32 +228,30 @@ void BlockPrinter::PrintBufferInfo(const std::unordered_set<const Buf*>& bufs) {
          << "bs_DPE"
          << "}}";
   }
-  os() << std::endl;
+  os() << '\n';
   emitIndent();
-  os() << "}" << std::endl << std::endl;
+  os() << "}" << '\n' << '\n';
 }
 
-void BlockPrinter::PrintDistribution(
-    const std::unordered_set<const Buf*>& bufs) {
+void BlockPrinter::PrintDistribution(const std::unordered_set<BufPtr>& bufs) {
   emitIndent();
-  os() << "distribution {" << std::endl;
-  for (const auto& buf : bufs) {
+  os() << "distribution {" << '\n';
+  for (auto& buf : bufs) {
     emitIndent();
     emitIndent();
-    auto buf_name = buf->name_hint();
     os() << block_analysis_->getFlatInputName(buf) << " = ";
-    os() << "{(0, 1, )}" << std::endl;
+    os() << "{(0, 1, )}" << '\n';
   }
-  os() << "  }" << std::endl << std::endl;
+  os() << "  }" << '\n' << '\n';
 }
 
 void BlockPrinter::PrintLoop(
-    const std::unordered_set<const Buf*>& bufs,
+    const std::unordered_set<BufPtr>& bufs,
     bool block_idx) {
   emitIndent();
   os() << "loop (";
   auto trip = 0;
-  for (const auto& buf : bufs) {
+  for (auto& buf : bufs) {
     if (trip > 0) {
       os() << ",";
     }
@@ -268,9 +264,9 @@ void BlockPrinter::PrintLoop(
 }
 
 void BlockPrinter::PrintReshapeInfo(
-    const std::unordered_set<const Buf*>& bufs,
+    const std::unordered_set<BufPtr>& bufs,
     bool reverse) {
-  for (const auto& buf : bufs) {
+  for (auto& buf : bufs) {
     emitIndent();
     os() << "reshape("
          << (reverse ? block_analysis_->getFlatInputName(buf)
@@ -278,41 +274,40 @@ void BlockPrinter::PrintReshapeInfo(
          << ", "
          << (reverse ? block_analysis_->getInputName(buf)
                      : block_analysis_->getFlatInputName(buf))
-         << ")" << std::endl;
+         << ")" << '\n';
   }
 }
 
-void BlockPrinter::PrintDMAs(const std::unordered_set<const Buf*>& bufs) {
-  for (const auto& read : bufs) {
+void BlockPrinter::PrintDMAs(const std::unordered_set<BufPtr>& bufs) {
+  for (auto& read : bufs) {
     emitIndent();
     os() << "dma_in(";
     os() << block_analysis_->getFlatInputName(read);
-    os() << ")" << std::endl;
+    os() << ")" << '\n';
   }
 }
-void BlockPrinter::PrintAdjustBuffers(
-    const std::unordered_set<const Buf*>& bufs) {
-  for (const auto& read : bufs) {
+void BlockPrinter::PrintAdjustBuffers(const std::unordered_set<BufPtr>& bufs) {
+  for (auto& read : bufs) {
     emitIndent();
     os() << "adjust_buffer(";
     os() << block_analysis_->getFlatInputName(read);
-    os() << ")" << std::endl;
+    os() << ")" << '\n';
   }
 }
 
-void BlockPrinter::visit(const Load* v) {
+void BlockPrinter::visit(const LoadPtr& v) {
   os() << block_analysis_->getFlatInputName(v->buf()) << ".buffer, ";
 }
-void BlockPrinter::visit(const Store* v) {
+void BlockPrinter::visit(const StorePtr& v) {
   emitIndent();
   os() << *v->value() << block_analysis_->getFlatInputName(v->buf())
-       << ".tensor)" << std::endl;
+       << ".tensor)" << '\n';
 }
 
-void BlockPrinter::visit(const Block* v) {
-  os() << "{" << std::endl;
+void BlockPrinter::visit(const BlockPtr& v) {
+  os() << "{" << '\n';
   indent_++;
-  for (Stmt* s : v->stmts()) {
+  for (const StmtPtr& s : v->stmts()) {
     s->accept(this);
   }
   indent_--;
@@ -326,20 +321,20 @@ std::string BlockCodeGen::GetUniqueFuncName(const std::string& func_prefix) {
   static int64_t counter = 0;
   ++counter;
   int64_t value = counter;
-  return func_prefix + "_" + c10::to_string(value);
+  return func_prefix + "_" + std::to_string(value);
 }
 
 void BlockCodeGen::Initialize() {
   block_analysis_ = std::make_unique<BlockAnalysis>();
   printer_ = std::make_unique<BlockPrinter>(&oss_, block_analysis_.get());
 
-  Stmt* stmt_v = stmt();
+  StmtPtr stmt_v = stmt();
   stmt_v->accept(block_analysis_.get());
 
   auto buf_reads = block_analysis_->loads();
   auto buf_writes = block_analysis_->stores();
   // Ensure all Bufs in reads/writes are in the map
-  std::unordered_set<const Buf*> bufs(buf_reads.begin(), buf_reads.end());
+  std::unordered_set<BufPtr> bufs(buf_reads.begin(), buf_reads.end());
   bufs.insert(buf_writes.begin(), buf_writes.end());
   if (!block_analysis_->areBufsInMap(bufs)) {
     throw std::runtime_error("BlockCodeGen: Entry not in input/Buffer map");
@@ -358,17 +353,16 @@ void BlockCodeGen::Initialize() {
   stmt_v->accept(printer_.get());
 
   GRAPH_DEBUG("Generated Block code: ", oss_.str(), "\n");
-
-  USE_TRIGGER(block_codegen_created);
 }
 
 void BlockCodeGen::call(const std::vector<CallArg>& args) {
+  throw std::runtime_error("BlockCodeGen: Cannot call Block code ");
+}
+void BlockCodeGen::call_raw(const std::vector<void*>& args) {
   throw std::runtime_error("BlockCodeGen: Cannot call Block code ");
 }
 
 BlockCodeGen::~BlockCodeGen() = default;
 RegisterCodeGen<BlockCodeGen> block_codegen_reg("block_codegen");
 
-} // namespace tensorexpr
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit::tensorexpr

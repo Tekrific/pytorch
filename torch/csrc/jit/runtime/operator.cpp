@@ -1,15 +1,15 @@
 #include <torch/csrc/jit/runtime/operator.h>
 
 #include <ATen/ATen.h>
-#include <ATen/core/alias_info.h>
+#include <ATen/core/interned_strings.h>
+#include <c10/util/irange.h>
 #include <torch/csrc/jit/frontend/edit_distance.h>
 
 #include <queue>
 #include <utility>
 #include <vector>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace {
 using OperatorMap =
@@ -207,14 +207,14 @@ bool printerHasSpecialCaseFor(Symbol sym) {
   // schema to editing this list here. These cases should only be things
   // that require special handling because they do not fit normal schema
   const static std::unordered_set<Symbol> handled = {
-      prim::Constant,      prim::Uninitialized, prim::fork,
-      prim::ListConstruct, prim::DictConstruct, prim::ListUnpack,
-      prim::Print,         prim::PythonOp,      prim::TupleConstruct,
-      prim::TupleIndex,    prim::TupleSlice,    prim::TupleUnpack,
-      prim::CreateObject,  prim::GetAttr,       prim::SetAttr,
-      prim::CallFunction,  prim::isinstance,    prim::unchecked_cast,
-      prim::tolist,        prim::rpc_async,     prim::rpc_sync,
-      prim::rpc_remote};
+      prim::Constant,       prim::Uninitialized, prim::fork,
+      prim::awaitable,      prim::ListConstruct, prim::DictConstruct,
+      prim::ListUnpack,     prim::Print,         prim::PythonOp,
+      prim::TupleConstruct, prim::TupleIndex,    prim::TupleSlice,
+      prim::TupleUnpack,    prim::CreateObject,  prim::GetAttr,
+      prim::SetAttr,        prim::CallFunction,  prim::isinstance,
+      prim::unchecked_cast, prim::tolist,        prim::rpc_async,
+      prim::rpc_sync,       prim::rpc_remote};
 
   // WARNING: by adding a value to this set, you are asserting that your
   // primitive is only ever added during optimization and does not need
@@ -240,9 +240,13 @@ bool printerHasSpecialCaseFor(Symbol sym) {
       prim::CudaFusionGroup, // optimization pass adds it
       prim::CudaFusionGuard, // optimization pass adds it
       prim::TensorExprGroup, // optimization pass adds it
+      prim::TensorExprDynamicGroup, // optimization pass adds it
       prim::StaticSubgraph, // optimization pass adds it
       prim::ConstantMKLDNNTensor, // optimization pass adds it
       prim::BroadcastMKLDNNTensors, // optimization pass adds it
+      prim::oneDNNFusionGroup, // optimization pass adds it
+      prim::oneDNNFusionGuard, // optimization pass adds it
+      prim::StaticRuntimeCopyOuts, // used in SR only
       prim::Load, // used in interpreter only
       prim::MMTreeReduce, // used as an optimization
       prim::MMBatchSide, // used as an optimization
@@ -278,8 +282,10 @@ bool aliasAnalysisHasSpecialCaseFor(Symbol symbol) {
       prim::Loop,
       prim::FusionGroup,
       prim::CudaFusionGroup,
+      prim::oneDNNFusionGroup,
       prim::DifferentiableGraph,
       prim::TensorExprGroup,
+      prim::TensorExprDynamicGroup,
       prim::StaticSubgraph,
       prim::FunctionalGraph,
       prim::Constant,
@@ -306,6 +312,9 @@ bool aliasAnalysisHasSpecialCaseFor(Symbol symbol) {
       prim::ConstantMKLDNNTensor,
       prim::BroadcastMKLDNNTensors,
       prim::fork,
+      prim::awaitable,
+      prim::awaitable_nowait,
+      prim::awaitable_wait,
       prim::CreateObject,
       prim::AutogradAdd,
       prim::GetAttr,
@@ -352,10 +361,10 @@ void registerOperator(Operator&& op) {
           op.schema().name(),
           ". File a bug to add a case for this operator.\n");
     }
-    if (!aliasAnalysisHasSpecialCaseFor(s) &&
+    if (aliasAnalysisHasSpecialCaseFor(s) &&
         op.aliasAnalysisKind() == AliasAnalysisKind::CONSERVATIVE) {
       AT_ERROR(
-          "Missing special case in alias analysis for non-schematized"
+          "Conflict in special casing in alias analysis for non-schematized"
           " operator ",
           op.schema().name(),
           ". File a bug to add a case for this operator.\n");
@@ -383,6 +392,29 @@ const std::vector<std::shared_ptr<Operator>>& getAllOperatorsFor(Symbol name) {
   return getRegistry().getOperators(name);
 }
 
+std::vector<std::shared_ptr<Operator>> getAllSortedOperatorsFor(Symbol name) {
+  const auto& unsortedOps = getAllOperatorsFor(name);
+  // Depending on the order of registration, aten or jit ops may be
+  // registered first. This sorting is helpful in cases where
+  // deterministic (i.e. not dependent on build config) behavior is
+  // desired; e.g. torch.ops.aten.* uses this function, and tries to
+  // find the "first" op that matches input args. Without the sorting,
+  // the "first" op may change depending on registration order.
+  std::vector<std::shared_ptr<Operator>> sortedOps;
+  sortedOps.reserve(unsortedOps.size());
+  std::copy_if(
+      unsortedOps.begin(),
+      unsortedOps.end(),
+      std::back_inserter(sortedOps),
+      [](const std::shared_ptr<Operator>& op) { return op->isC10Op(); });
+  std::copy_if(
+      unsortedOps.begin(),
+      unsortedOps.end(),
+      std::back_inserter(sortedOps),
+      [](const std::shared_ptr<Operator>& op) { return !op->isC10Op(); });
+  return sortedOps;
+}
+
 std::shared_ptr<Operator> findOperatorFor(const c10::OperatorName& full_name) {
   for (const auto& op :
        getRegistry().getOperators(Symbol::fromQualString(full_name.name))) {
@@ -406,7 +438,7 @@ std::string canonicalSchemaString(const FunctionSchema& schema) {
   out.push_back('(');
 
   bool seen_kwarg_only = false;
-  for (size_t i = 0; i < schema.arguments().size(); ++i) {
+  for (const auto i : c10::irange(schema.arguments().size())) {
     if (i > 0) {
       out += ", ";
     }
@@ -425,7 +457,7 @@ std::string canonicalSchemaString(const FunctionSchema& schema) {
     out += schema.returns().at(0).type()->str();
   } else if (schema.returns().size() > 1) {
     out.push_back('(');
-    for (size_t i = 0; i < schema.returns().size(); ++i) {
+    for (const auto i : c10::irange(schema.returns().size())) {
       if (i > 0) {
         out += ", ";
       }
@@ -436,5 +468,4 @@ std::string canonicalSchemaString(const FunctionSchema& schema) {
   return out;
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

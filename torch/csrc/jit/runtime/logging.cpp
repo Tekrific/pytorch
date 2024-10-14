@@ -1,12 +1,12 @@
 #include <torch/csrc/jit/runtime/logging.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 
-namespace torch {
-namespace jit {
-namespace logging {
+namespace torch::jit::logging {
 
 // TODO: multi-scale histogram for this thing
 
@@ -60,13 +60,11 @@ JITTimePoint timePoint() {
   return JITTimePoint{std::chrono::high_resolution_clock::now()};
 }
 
-void recordDurationSince(const std::string& name, JITTimePoint tp) {
+void recordDurationSince(const std::string& name, const JITTimePoint& tp) {
   auto end = std::chrono::high_resolution_clock::now();
   // Measurement in microseconds.
   auto seconds = std::chrono::duration<double>(end - tp.point).count() * 1e9;
   logging::getLogger()->addStatValue(name, seconds);
 }
 
-} // namespace logging
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit::logging

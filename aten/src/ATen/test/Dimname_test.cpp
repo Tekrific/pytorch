@@ -2,7 +2,7 @@
 
 #include <ATen/Dimname.h>
 #include <c10/util/Exception.h>
-#include <c10/util/Optional.h>
+#include <optional>
 
 using at::NameType;
 using at::Symbol;
@@ -40,14 +40,16 @@ TEST(DimnameTest, createNormalName) {
   auto dimname = Dimname::fromSymbol(foo);
   ASSERT_EQ(dimname.type(), NameType::BASIC);
   ASSERT_EQ(dimname.symbol(), foo);
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-goto,hicpp-avoid-goto)
   ASSERT_THROW(Dimname::fromSymbol(Symbol::dimname("inva.lid")), c10::Error);
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-goto,hicpp-avoid-goto)
   ASSERT_THROW(Dimname::fromSymbol(Symbol::dimname("1invalid")), c10::Error);
 }
 
 static void check_unify_and_match(
     const std::string& dimname,
     const std::string& other,
-    at::optional<const std::string> expected) {
+    std::optional<const std::string> expected) {
   auto dimname1 = Dimname::fromSymbol(Symbol::dimname(dimname));
   auto dimname2 = Dimname::fromSymbol(Symbol::dimname(other));
   auto result = dimname1.unify(dimname2);
@@ -67,5 +69,5 @@ TEST(DimnameTest, unifyAndMatch) {
   check_unify_and_match("a", "*", "a");
   check_unify_and_match("*", "a", "a");
   check_unify_and_match("*", "*", "*");
-  check_unify_and_match("a", "b", c10::nullopt);
+  check_unify_and_match("a", "b", std::nullopt);
 }

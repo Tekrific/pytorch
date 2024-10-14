@@ -1,12 +1,15 @@
+# mypy: allow-untyped-decorators
+# mypy: allow-untyped-defs
 import ast
 import inspect
 import textwrap
 import copy
+import functools
 from types import FunctionType
 from typing import cast, Union, Callable, Dict, Optional, Any
-from torch.fx.symbolic_trace import Tracer
+from torch.fx._symbolic_trace import Tracer
 from torch.fx.graph import Graph
-from torch.jit.frontend import normalize_source_lines
+from torch._sources import normalize_source_lines
 import torch
 
 class AST_Rewriter(ast.NodeTransformer):
@@ -20,6 +23,11 @@ class AST_Rewriter(ast.NodeTransformer):
     https://docs.python.org/3/library/ast.html#ast.NodeTransformer
     """
 
+    # This function checks for new keys added in the globals dict. TorchDynamo
+    # can insert new keys in the global dict and upset the check. Therefore, put
+    # a disable here. This function is an optimization pass and not really
+    # suitable for dynamo tracing anyways.
+    @torch._dynamo.disable
     def rewrite(self, fn: FunctionType):
 
         # Normalize the source lines
@@ -32,7 +40,7 @@ class AST_Rewriter(ast.NodeTransformer):
         source_ast = ast.parse(normalized_str)
         dest_ast = ast.fix_missing_locations(self.visit(source_ast))
 
-        # Pull out the compiled fucntion from the newly-created Module
+        # Pull out the compiled function from the newly-created Module
         code = compile(dest_ast, "", "exec")
         globals_dict = copy.copy(fn.__globals__)
         keys_before = set(globals_dict.keys())
@@ -41,8 +49,23 @@ class AST_Rewriter(ast.NodeTransformer):
         assert len(new_keys) == 1
         fn_compiled = globals_dict[new_keys[0]]
 
+        # return the compiled function with the original globals
+        def change_func_globals(f, globals):
+            """Based on https://stackoverflow.com/a/13503277/2988730 (@unutbu)"""
+            # __globals__ is a private member of the function class
+            # so we have to copy the function, f, all of its member, except f.__globals__
+            g = FunctionType(
+                f.__code__,
+                globals,
+                name=f.__name__,
+                argdefs=f.__defaults__,
+                closure=f.__closure__,
+            )
+            g = functools.update_wrapper(g, f)
+            g.__kwdefaults__ = copy.copy(f.__kwdefaults__)  # type:ignore[attr-defined]
+            return g
         # Return the correct FunctionType object
-        return fn_compiled
+        return change_func_globals(fn_compiled, globals=fn.__globals__)
 
     def visit_Assert(self, node):
         """
@@ -63,6 +86,19 @@ class AST_Rewriter(ast.NodeTransformer):
         # Return the new Call node to signify that we want to use it as
         # a replacement for the original _assert node
         return ast.copy_location(expr_wrapper, node)
+
+    def visit_AnnAssign(self, node):
+        """
+        Swap out Python's AnnAssign with an Assign node where the annotation function is called.
+        Example:
+             Original:
+             y: Tensor_Type(1,2,3, Dyn) = f2(x)
+            Output:
+             y = annotate(f2(x),Tensor_Type((1,2,3,Dyn)))
+        """
+        return ast.Assign(targets=[node.target], value=ast.Call(
+            func=ast.Name(id='annotate', ctx=ast.Load()),
+            args=[node.value, node.annotation], keywords=[]))
 
 
 class RewritingTracer(Tracer):

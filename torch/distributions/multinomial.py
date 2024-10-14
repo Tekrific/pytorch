@@ -1,9 +1,13 @@
+# mypy: allow-untyped-defs
 import torch
-from torch._six import inf
+from torch import inf
+from torch.distributions import Categorical, constraints
+from torch.distributions.binomial import Binomial
 from torch.distributions.distribution import Distribution
-from torch.distributions import Categorical
-from torch.distributions import constraints
 from torch.distributions.utils import broadcast_all
+
+
+__all__ = ["Multinomial"]
 
 
 class Multinomial(Distribution):
@@ -16,11 +20,11 @@ class Multinomial(Distribution):
     called (see example below)
 
     .. note:: The `probs` argument must be non-negative, finite and have a non-zero sum,
-              and it will be normalized to sum to 1 along the last dimension. attr:`probs`
+              and it will be normalized to sum to 1 along the last dimension. :attr:`probs`
               will return this normalized value.
               The `logits` argument will be interpreted as unnormalized log probabilities
               and can therefore be any real number. It will likewise be normalized so that
-              the resulting probabilities sum to 1 along the last dimension. attr:`logits`
+              the resulting probabilities sum to 1 along the last dimension. :attr:`logits`
               will return this normalized value.
 
     -   :meth:`sample` requires a single shared `total_count` for all
@@ -30,6 +34,7 @@ class Multinomial(Distribution):
 
     Example::
 
+        >>> # xdoctest: +SKIP("FIXME: found invalid values")
         >>> m = Multinomial(100, torch.tensor([ 1., 1., 1., 1.]))
         >>> x = m.sample()  # equal probability of 0, 1, 2, 3
         tensor([ 21.,  24.,  30.,  25.])
@@ -42,8 +47,7 @@ class Multinomial(Distribution):
         probs (Tensor): event probabilities
         logits (Tensor): event log probabilities (unnormalized)
     """
-    arg_constraints = {'probs': constraints.simplex,
-                       'logits': constraints.real_vector}
+    arg_constraints = {"probs": constraints.simplex, "logits": constraints.real_vector}
     total_count: int
 
     @property
@@ -56,19 +60,22 @@ class Multinomial(Distribution):
 
     def __init__(self, total_count=1, probs=None, logits=None, validate_args=None):
         if not isinstance(total_count, int):
-            raise NotImplementedError('inhomogeneous total_count is not supported')
+            raise NotImplementedError("inhomogeneous total_count is not supported")
         self.total_count = total_count
         self._categorical = Categorical(probs=probs, logits=logits)
+        self._binomial = Binomial(total_count=total_count, probs=self.probs)
         batch_shape = self._categorical.batch_shape
         event_shape = self._categorical.param_shape[-1:]
-        super(Multinomial, self).__init__(batch_shape, event_shape, validate_args=validate_args)
+        super().__init__(batch_shape, event_shape, validate_args=validate_args)
 
     def expand(self, batch_shape, _instance=None):
         new = self._get_checked_instance(Multinomial, _instance)
         batch_shape = torch.Size(batch_shape)
         new.total_count = self.total_count
         new._categorical = self._categorical.expand(batch_shape)
-        super(Multinomial, new).__init__(batch_shape, self.event_shape, validate_args=False)
+        super(Multinomial, new).__init__(
+            batch_shape, self.event_shape, validate_args=False
+        )
         new._validate_args = self._validate_args
         return new
 
@@ -93,7 +100,9 @@ class Multinomial(Distribution):
 
     def sample(self, sample_shape=torch.Size()):
         sample_shape = torch.Size(sample_shape)
-        samples = self._categorical.sample(torch.Size((self.total_count,)) + sample_shape)
+        samples = self._categorical.sample(
+            torch.Size((self.total_count,)) + sample_shape
+        )
         # samples.shape is (total_count, sample_shape, batch_shape), need to change it to
         # (sample_shape, batch_shape, total_count)
         shifted_idx = list(range(samples.dim()))
@@ -102,6 +111,19 @@ class Multinomial(Distribution):
         counts = samples.new(self._extended_shape(sample_shape)).zero_()
         counts.scatter_add_(-1, samples, torch.ones_like(samples))
         return counts.type_as(self.probs)
+
+    def entropy(self):
+        n = torch.tensor(self.total_count)
+
+        cat_entropy = self._categorical.entropy()
+        term1 = n * cat_entropy - torch.lgamma(n + 1)
+
+        support = self._binomial.enumerate_support(expand=False)[1:]
+        binomial_probs = torch.exp(self._binomial.log_prob(support))
+        weights = torch.lgamma(support + 1)
+        term2 = (binomial_probs * weights).sum([0, -1])
+
+        return term1 + term2
 
     def log_prob(self, value):
         if self._validate_args:

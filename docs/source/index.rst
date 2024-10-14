@@ -18,7 +18,7 @@ Features described in this documentation are classified by release status:
   breaking changes can happen and notice will be given one release ahead
   of time).
 
-  *Beta:*  Features are tagged as Beta because the API may change based on
+  *Beta:*  These features are tagged as Beta because the API may change based on
   user feedback, because the performance needs to improve, or because
   coverage across operators is not yet complete. For Beta features, we are
   committing to seeing the feature through to the Stable classification.
@@ -28,11 +28,17 @@ Features described in this documentation are classified by release status:
   binary distributions like PyPI or Conda, except sometimes behind run-time
   flags, and are at an early stage for feedback and testing.
 
+.. toctree::
+   :glob:
+   :maxdepth: 1
+   :caption: Community
+
+   community/*
 
 .. toctree::
    :glob:
    :maxdepth: 1
-   :caption: Notes
+   :caption: Developer Notes
 
    notes/*
 
@@ -42,9 +48,11 @@ Features described in this documentation are classified by release status:
 
    cpp_index
    Javadoc <https://pytorch.org/javadoc/>
+   torch::deploy <deploy>
 
 .. toctree::
-   :maxdepth: 1
+   :glob:
+   :maxdepth: 2
    :caption: Python API
 
    torch
@@ -53,64 +61,90 @@ Features described in this documentation are classified by release status:
    tensors
    tensor_attributes
    tensor_view
+   torch.amp <amp>
    torch.autograd <autograd>
+   torch.library <library>
+   cpu
    cuda
-   torch.cuda.amp <amp>
+   torch.cuda.memory <torch_cuda_memory>
+   mps
+   xpu
+   mtia
+   meta
    torch.backends <backends>
+   torch.export <export>
    torch.distributed <distributed>
+   torch.distributed.tensor <distributed.tensor>
+   torch.distributed.algorithms.join <distributed.algorithms.join>
+   torch.distributed.elastic <distributed.elastic>
+   torch.distributed.fsdp <fsdp>
+   torch.distributed.tensor.parallel <distributed.tensor.parallel>
    torch.distributed.optim <distributed.optim>
+   torch.distributed.pipelining <distributed.pipelining>
+   torch.distributed.checkpoint <distributed.checkpoint>
    torch.distributions <distributions>
+   torch.compiler <torch.compiler>
    torch.fft <fft>
+   torch.func <func>
    futures
    fx
+   fx.experimental
    torch.hub <hub>
    torch.jit <jit>
    torch.linalg <linalg>
+   torch.monitor <monitor>
+   torch.signal <signal>
    torch.special <special>
    torch.overrides
+   torch.package <package>
    profiler
    nn.init
+   nn.attention
    onnx
    optim
    complex_numbers
    ddp_comm_hooks
-   pipeline
    quantization
    rpc
    torch.random <random>
+   masked
+   torch.nested <nested>
+   size
    sparse
    storage
+   torch.testing <testing>
+   torch.utils <utils>
    torch.utils.benchmark <benchmark_utils>
    torch.utils.bottleneck <bottleneck>
    torch.utils.checkpoint <checkpoint>
    torch.utils.cpp_extension <cpp_extension>
    torch.utils.data <data>
+   torch.utils.deterministic <deterministic>
+   torch.utils.jit <jit_utils>
    torch.utils.dlpack <dlpack>
    torch.utils.mobile_optimizer <mobile_optimizer>
    torch.utils.model_zoo <model_zoo>
    torch.utils.tensorboard <tensorboard>
+   torch.utils.module_tracker <module_tracker>
    type_info
    named_tensor
    name_inference
-   torch.__config__ <__config__>
+   torch.__config__ <config_mod>
+   torch.__future__ <future_mod>
+   logging
+   torch_environment_variables
 
 .. toctree::
    :maxdepth: 1
    :caption: Libraries
 
    torchaudio <https://pytorch.org/audio/stable>
+   TorchData <https://pytorch.org/data>
+   TorchRec <https://pytorch.org/torchrec>
+   TorchServe <https://pytorch.org/serve>
    torchtext <https://pytorch.org/text/stable>
    torchvision <https://pytorch.org/vision/stable>
-   TorchElastic <https://pytorch.org/elastic/>
-   TorchServe <https://pytorch.org/serve>
-   PyTorch on XLA Devices <http://pytorch.org/xla/>
-
-.. toctree::
-   :glob:
-   :maxdepth: 1
-   :caption: Community
-
-   community/*
+   PyTorch on XLA Devices <https://pytorch.org/xla/>
 
 Indices and tables
 ==================

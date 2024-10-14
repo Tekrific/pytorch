@@ -20,10 +20,11 @@ bool Dimname::isValidName(const std::string& name) {
   // letters A through Z, the underscore _ and, except for the first
   // character, the digits 0 through 9" (at least length 1)
   // https://docs.python.org/3/reference/lexical_analysis.html#identifiers
-  if (name.length() == 0) {
+  if (name.empty()) {
     return false;
   }
   for (auto it = name.begin(); it != name.end(); ++it) {
+    // NOLINTNEXTLINE(bugprone-branch-clone)
     if (std::isalpha(*it) || *it == '_') {
       continue;
     } else if (it != name.begin() && std::isdigit(*it)) {
@@ -56,7 +57,7 @@ Dimname Dimname::wildcard() {
   return result;
 }
 
-optional<Dimname> Dimname::unify(Dimname other) const {
+std::optional<Dimname> Dimname::unify(Dimname other) const {
   if (other.type() == NameType::WILDCARD) {
     return *this;
   }
@@ -66,7 +67,7 @@ optional<Dimname> Dimname::unify(Dimname other) const {
   if (name_ == other.symbol()) {
     return *this;
   }
-  return c10::nullopt;
+  return std::nullopt;
 }
 
 bool Dimname::matches(Dimname other) const {

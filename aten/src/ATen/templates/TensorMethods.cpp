@@ -1,102 +1,61 @@
 #include <c10/core/Scalar.h>
-#include <c10/core/MemoryFormat.h>
-#include <c10/core/QScheme.h>
-#include <c10/core/Stream.h>
-#include <c10/macros/Macros.h>
-#include <c10/core/TensorOptions.h>
-#include <c10/util/intrusive_ptr.h>
-#include <ATen/core/DeprecatedTypeProperties.h>
-#include <ATen/core/dispatch/Dispatcher.h>
-#include <ATen/core/NamedTensor.h>
-#include <ATen/core/LegacyTypeDispatch.h>
-#include <ATen/core/op_registration/hacky_wrapper_for_legacy_signatures.h>
-#include <ATen/quantized/Quantizer.h>
-#include <torch/csrc/WindowsTorchApiMacro.h>
+#include <ATen/core/TensorBody.h>
 
-${static_dispatch_extra_headers}
+#include <c10/util/string_view.h>
 
 namespace at {
 
-using Stream = c10::Stream;
+namespace {
 
-Tensor Tensor::cpu() const {
-  return to(options().device(DeviceType::CPU), /*non_blocking*/ false, /*copy*/ false);
+// Verifies the requested type is the same as the Tensor's type.
+void check_type(const TensorBase& tensor, ScalarType type, c10::string_view type_name) {
+  TORCH_CHECK(
+      tensor.scalar_type() == type
+      || (isQIntType(tensor.scalar_type())
+          && toUnderlying(tensor.scalar_type()) == type),
+      "expected scalar type ", type_name, " but found ", tensor.scalar_type());
 }
 
-// TODO: The Python version also accepts arguments
-Tensor Tensor::cuda() const {
-  return to(options().device(DeviceType::CUDA), /*non_blocking*/ false, /*copy*/ false);
-}
+} // namespace
 
-Tensor Tensor::hip() const {
-  return to(options().device(DeviceType::HIP), /*non_blocking*/ false, /*copy*/ false);
-}
+#define DEFINE_CAST(T, name)                                         \
+   template <>                                                       \
+   TORCH_API const T* TensorBase::const_data_ptr() const {           \
+     check_type(*this, ScalarType::name, #name);                     \
+     return this->unsafeGetTensorImpl()->data_ptr_impl<T>();         \
+   }                                                                 \
+                                                                     \
+   template <>                                                       \
+   TORCH_API const T* TensorBase::const_data_ptr<const T>() const {  \
+     check_type(*this, ScalarType::name, #name);                     \
+     return this->unsafeGetTensorImpl()->data_ptr_impl<std::remove_const_t<T>>(); \
+   }                                                                 \
+                                                                     \
+   template <>                                                       \
+   TORCH_API T* TensorBase::mutable_data_ptr() const {               \
+     check_type(*this, ScalarType::name, #name);                     \
+     return this->unsafeGetTensorImpl()->mutable_data_ptr_impl<T>(); \
+   }                                                                 \
+                                                                     \
+   template <>                                                       \
+   TORCH_API T* TensorBase::data_ptr() const {                       \
+     return mutable_data_ptr<T>();                                   \
+   }                                                                 \
 
-Tensor Tensor::vulkan() const {
-  return to(options().device(DeviceType::Vulkan), /*non_blocking*/ false, /*copy*/ false);
-}
+ AT_FORALL_SCALAR_TYPES_WITH_COMPLEX(DEFINE_CAST)
+ AT_FORALL_QINT_TYPES(DEFINE_CAST)
+ DEFINE_CAST(uint16_t, UInt16)
+ DEFINE_CAST(uint32_t, UInt32)
+ DEFINE_CAST(uint64_t, UInt64)
+ #undef DEFINE_CAST
 
-Tensor Tensor::metal() const {
-  return to(options().device(DeviceType::Metal), /*non_blocking*/ false, /*copy*/ false);
-}
+ #define DEFINE_ITEM(T, name)      \
+   template <>                     \
+   TORCH_API T Tensor::item() const { \
+     return item().to##name();     \
+   }
 
-Tensor Tensor::toType(ScalarType t) const {
-  return to(options().dtype(t), /*non_blocking*/ false, /*copy*/ false);
-}
+ AT_FORALL_SCALAR_TYPES_WITH_COMPLEX(DEFINE_ITEM)
+ #undef DEFINE_ITEM
 
-// TODO: Deprecate me
-Tensor Tensor::toBackend(Backend b) const {
-  return to(options().device(backendToDeviceType(b)).layout(layout_from_backend(b)), /*non_blocking*/ false, /*copy*/ false);
-}
-
-TensorOptions Tensor::options() const {
-  return TensorOptions().dtype(dtype())
-                        .device(device())
-                        .layout(layout());
-}
-
-${tensor_method_definitions}
-
-NamedTensorMeta* Tensor::get_named_tensor_meta() {
-  return static_cast<NamedTensorMeta*>(impl_->named_tensor_meta());
-}
-
-const NamedTensorMeta* Tensor::get_named_tensor_meta() const {
-  return static_cast<NamedTensorMeta*>(impl_->named_tensor_meta());
-}
-
-bool Tensor::has_names() const {
-  // If a user is using unnamed tensors, then we can short-circuit right here.
-  // Otherwise, impl::has_names attempts to retrieve names.
-  if (!impl_->has_named_tensor_meta()) {
-    return false;
-  }
-  return impl::has_names(unsafeGetTensorImpl());
-}
-
-#define DEFINE_CAST(T, name)                                        \
-  template <>                                                       \
-  TORCH_API T* Tensor::data_ptr() const {                           \
-    TORCH_CHECK(                                                    \
-        scalar_type() == ScalarType::name,                          \
-        "expected scalar type "                                     \
-        #name                                                       \
-        " but found ",                                              \
-        scalar_type());                                             \
-    return this->unsafeGetTensorImpl()->data_ptr_impl<T>();         \
-  }
-
-AT_FORALL_SCALAR_TYPES_WITH_COMPLEX_EXCEPT_COMPLEX_HALF(DEFINE_CAST)
-AT_FORALL_QINT_TYPES(DEFINE_CAST)
-#undef DEFINE_CAST
-
-#define DEFINE_ITEM(T, name)      \
-  template <>                     \
-  TORCH_API T Tensor::item() const { \
-    return item().to##name();     \
-  }
-
-AT_FORALL_SCALAR_TYPES_WITH_COMPLEX_EXCEPT_COMPLEX_HALF(DEFINE_ITEM)
-#undef DEFINE_ITEM
-
-} //namespace at
+ } //namespace at

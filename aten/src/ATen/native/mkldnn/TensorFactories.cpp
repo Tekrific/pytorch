@@ -1,10 +1,18 @@
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
 #include <ATen/native/mkldnn/MKLDNNCommon.h>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/empty_native.h>
+#endif
 
 namespace at { namespace native {
 
 #if AT_MKLDNN_ENABLED()
 
-Tensor empty_mkldnn(IntArrayRef sizes, c10::optional<ScalarType> dtype, c10::optional<Layout> layout, c10::optional<Device> device, c10::optional<bool> pin_memory, c10::optional<c10::MemoryFormat> optional_memory_format) {
+Tensor empty_mkldnn(IntArrayRef sizes, std::optional<ScalarType> dtype, std::optional<Layout> layout, std::optional<Device> device, std::optional<bool> pin_memory, std::optional<c10::MemoryFormat> optional_memory_format) {
   TORCH_CHECK(
      !optional_memory_format.has_value(),
      "'memory_format' argument is incompatible with mkldnn tensor");
@@ -18,7 +26,7 @@ Tensor empty_mkldnn(IntArrayRef sizes, c10::optional<ScalarType> dtype, c10::opt
 
 #else
 
-Tensor empty_mkldnn(IntArrayRef sizes, c10::optional<ScalarType> dtype, c10::optional<Layout> layout, c10::optional<Device> device, c10::optional<bool> pin_memory, c10::optional<c10::MemoryFormat> optional_memory_format) {
+Tensor empty_mkldnn(IntArrayRef sizes, std::optional<ScalarType> dtype, std::optional<Layout> layout, std::optional<Device> device, std::optional<bool> pin_memory, std::optional<c10::MemoryFormat> optional_memory_format) {
   TORCH_CHECK(false, "empty_mkldnn: MKL-DNN build is disabled");
 }
 

@@ -1,9 +1,13 @@
 #pragma once
 
 #include <c10/macros/Macros.h>
+#include <c10/util/ArrayRef.h>
 #include <c10/util/Deprecated.h>
-#include <stdint.h>
+#include <c10/util/Exception.h>
+#include <c10/util/irange.h>
 #include <cstddef>
+#include <cstdint>
+#include <type_traits>
 
 namespace at {
 
@@ -96,6 +100,7 @@ public:
       const index_t* strides_)
       : TensorAccessorBase<T, 1, PtrTraits, index_t>(data_,sizes_,strides_) {}
   C10_HOST_DEVICE T & operator[](index_t i) {
+    // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
     return this->data_[this->strides_[0]*i];
   }
   C10_HOST_DEVICE const T & operator[](index_t i) const {
@@ -116,6 +121,7 @@ template<typename T, size_t N, template <typename U> class PtrTraits = DefaultPt
 class GenericPackedTensorAccessorBase {
 public:
   typedef typename PtrTraits<T>::PtrType PtrType;
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   C10_HOST GenericPackedTensorAccessorBase(
       PtrType data_,
       const index_t* sizes_,
@@ -126,13 +132,14 @@ public:
   }
 
   // if index_t is not int64_t, we want to have an int64_t constructor
-  template <typename source_index_t, class = typename std::enable_if<std::is_same<source_index_t, int64_t>::value>::type>
+  template <typename source_index_t, class = std::enable_if_t<std::is_same_v<source_index_t, int64_t>>>
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   C10_HOST GenericPackedTensorAccessorBase(
       PtrType data_,
       const source_index_t* sizes_,
       const source_index_t* strides_)
       : data_(data_) {
-    for (int i = 0; i < N; i++) {
+    for (const auto i : c10::irange(N)) {
       this->sizes_[i] = sizes_[i];
       this->strides_[i] = strides_[i];
     }
@@ -152,8 +159,18 @@ public:
   }
 protected:
   PtrType data_;
+  // NOLINTNEXTLINE(*c-arrays*)
   index_t sizes_[N];
+  // NOLINTNEXTLINE(*c-arrays*)
   index_t strides_[N];
+  C10_HOST void bounds_check_(index_t i) const {
+    TORCH_CHECK_INDEX(
+        0 <= i && i < index_t{N},
+        "Index ",
+        i,
+        " is not within bounds of a tensor of dimension ",
+        N);
+  }
 };
 
 template<typename T, size_t N, template <typename U> class PtrTraits = DefaultPtrTraits, typename index_t = int64_t>
@@ -168,7 +185,7 @@ public:
       : GenericPackedTensorAccessorBase<T, N, PtrTraits, index_t>(data_, sizes_, strides_) {}
 
   // if index_t is not int64_t, we want to have an int64_t constructor
-  template <typename source_index_t, class = typename std::enable_if<std::is_same<source_index_t, int64_t>::value>::type>
+  template <typename source_index_t, class = std::enable_if_t<std::is_same_v<source_index_t, int64_t>>>
   C10_HOST GenericPackedTensorAccessor(
       PtrType data_,
       const source_index_t* sizes_,
@@ -186,6 +203,22 @@ public:
     const index_t* new_strides = this->strides_ + 1;
     return TensorAccessor<T,N-1,PtrTraits,index_t>(this->data_ + this->strides_[0]*i, new_sizes, new_strides);
   }
+
+  /// Returns a PackedTensorAccessor of the same dimension after transposing the
+  /// two dimensions given. Does not actually move elements; transposition is
+  /// made by permuting the size/stride arrays. If the dimensions are not valid,
+  /// asserts.
+  C10_HOST GenericPackedTensorAccessor<T, N, PtrTraits, index_t> transpose(
+      index_t dim1,
+      index_t dim2) const {
+    this->bounds_check_(dim1);
+    this->bounds_check_(dim2);
+    GenericPackedTensorAccessor<T, N, PtrTraits, index_t> result(
+        this->data_, this->sizes_, this->strides_);
+    std::swap(result.strides_[dim1], result.strides_[dim2]);
+    std::swap(result.sizes_[dim1], result.sizes_[dim2]);
+    return result;
+  }
 };
 
 template<typename T, template <typename U> class PtrTraits, typename index_t>
@@ -199,7 +232,7 @@ public:
       : GenericPackedTensorAccessorBase<T, 1, PtrTraits, index_t>(data_, sizes_, strides_) {}
 
   // if index_t is not int64_t, we want to have an int64_t constructor
-  template <typename source_index_t, class = typename std::enable_if<std::is_same<source_index_t, int64_t>::value>::type>
+  template <typename source_index_t, class = std::enable_if_t<std::is_same_v<source_index_t, int64_t>>>
   C10_HOST GenericPackedTensorAccessor(
       PtrType data_,
       const source_index_t* sizes_,
@@ -211,6 +244,18 @@ public:
   }
   C10_DEVICE const T& operator[](index_t i) const {
     return this->data_[this->strides_[0]*i];
+  }
+
+  // Same as in the general N-dimensional case, but note that in the
+  // 1-dimensional case the returned PackedTensorAccessor will always be an
+  // identical copy of the original
+  C10_HOST GenericPackedTensorAccessor<T, 1, PtrTraits, index_t> transpose(
+      index_t dim1,
+      index_t dim2) const {
+    this->bounds_check_(dim1);
+    this->bounds_check_(dim2);
+    return GenericPackedTensorAccessor<T, 1, PtrTraits, index_t>(
+        this->data_, this->sizes_, this->strides_);
   }
 };
 

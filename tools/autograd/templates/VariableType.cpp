@@ -1,8 +1,13 @@
 #include "torch/csrc/autograd/VariableTypeUtils.h"
+#include "torch/csrc/autograd/generated/VariableType.h"
 #include "torch/csrc/autograd/FunctionsManual.h"
 
 #include <ATen/RedispatchFunctions.h>
+#include <c10/core/impl/TorchDispatchModeTLS.h>
+#include <ATen/core/TorchDispatchUtils.h>
 #include <torch/library.h>
+
+#include <ATen/SparseCsrTensorUtils.h>
 
 
 // ${generated_comment}
@@ -31,11 +36,12 @@ using namespace at;
 using namespace torch::autograd::generated;
 using namespace torch::autograd::generated::details;
 
-namespace torch { namespace autograd {
+
+namespace torch::autograd {
 
 namespace VariableType {
 namespace{
-  void reset_grad_accumulator(Variable & self) {
+  C10_UNUSED void reset_grad_accumulator(Variable & self) {
     AutogradMeta* meta = torch::autograd::impl::get_autograd_meta(self);
     if (meta != nullptr) {
       meta->grad_accumulator_.reset();
@@ -44,16 +50,16 @@ namespace{
 }
 
 namespace {
+
+
 ${type_derived_method_definitions}
 }
 }
 
 namespace {
 
-TORCH_LIBRARY_IMPL(aten, Autograd, m) {
-  ${wrapper_registrations}
-}
+${wrapper_registrations}
 
 }
 
-}} // namespace torch::autograd
+} // namespace torch::autograd

@@ -13,14 +13,12 @@
 #
 
 
-
-
-from distutils import sysconfig
 import sys
+import sysconfig
+
 
 flags = [
-    '-DPYTHON_EXECUTABLE:FILEPATH={}'.format(sys.executable),
-    '-DPYTHON_INCLUDE_DIR={}'.format(sysconfig.get_python_inc()),
+    f"-DPython_EXECUTABLE:FILEPATH={sys.executable}",
 ]
 
-print(' '.join(flags), end='')
+print(" ".join(flags), end="")

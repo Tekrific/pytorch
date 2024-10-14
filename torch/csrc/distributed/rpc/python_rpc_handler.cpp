@@ -3,9 +3,7 @@
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/csrc/utils/python_compat.h>
 
-namespace torch {
-namespace distributed {
-namespace rpc {
+namespace torch::distributed::rpc {
 
 namespace {
 
@@ -16,7 +14,7 @@ constexpr auto kInternalModule = "torch.distributed.rpc.internal";
 #define PROFILE_GIL_SCOPED_ACQUIRE                                       \
   std::chrono::time_point<std::chrono::high_resolution_clock> startTime; \
   auto shouldProfileGIL =                                                \
-      RpcAgent::getCurrentRpcAgent()->isGILProfilingEnabled();           \
+      RpcAgent::getCurrentRpcAgent() -> isGILProfilingEnabled();         \
   if (shouldProfileGIL) {                                                \
     startTime = std::chrono::high_resolution_clock::now();               \
   }                                                                      \
@@ -32,7 +30,7 @@ constexpr auto kInternalModule = "torch.distributed.rpc.internal";
 struct PythonTypeResolver : public jit::Resolver {
   std::shared_ptr<jit::SugaredValue> resolveValue(
       const std::string& /* unused */,
-      torch::jit::Function& /* unused */,
+      torch::jit::GraphFunction& /* unused */,
       const jit::SourceRange& /* unused */) override {
     TORCH_INTERNAL_ASSERT(
         false, "RPC Type resolver does not need to resolve value");
@@ -179,8 +177,7 @@ bool PythonRpcHandler::isRemoteException(const py::object& obj) {
   auto type = obj.get_type();
   auto moduleName = type.attr("__module__").cast<std::string>();
   auto qualName = type.attr("__qualname__").cast<std::string>();
-  return moduleName.compare(kInternalModule) == 0 &&
-      qualName.compare("RemoteException") == 0;
+  return moduleName == kInternalModule && qualName == "RemoteException";
 }
 
 TypePtr PythonRpcHandler::parseTypeFromStr(const std::string& type_str) {
@@ -197,6 +194,4 @@ const PythonRpcHandler::RRefTypeFunctions& PythonRpcHandler::
   return rrefTypeFunctions_;
 }
 
-} // namespace rpc
-} // namespace distributed
-} // namespace torch
+} // namespace torch::distributed::rpc

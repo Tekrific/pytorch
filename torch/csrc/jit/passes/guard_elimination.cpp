@@ -8,8 +8,7 @@
 #include <memory>
 #include <unordered_set>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 struct GuardElimination {
   GuardElimination(std::shared_ptr<Graph> graph)
@@ -89,7 +88,7 @@ struct GuardElimination {
     // uses on *all* parameters are moved to the same anchor node
     // and they may come in different order after the anchor node
     // e.g. (anchor, guard_x, guard_y, guard_x, guard_y)
-    // this pass recognizes contigious streches of guards and
+    // this pass recognizes contiguous stretches of guards and
     // keeps track of the guards it's seen for each def. the next time
     // the guard on the same def, it simply removes it.
     std::unordered_map<Value*, Node*> inputs_to_guards;
@@ -117,16 +116,6 @@ struct GuardElimination {
     }
   }
 
-  bool isDominatedBy(Node* node, Node* dominator) {
-    while (node) {
-      if (node->owningBlock() == dominator->owningBlock()) {
-        return dominator->isBefore(node);
-      }
-      node = node->owningBlock()->owningNode();
-    }
-    return false;
-  }
-
   void removeDominatedGuards(Block* b) {
     // If a Node guards a value which isn't mutated, then that node
     // can replace all other guards of the value which it dominates
@@ -141,7 +130,7 @@ struct GuardElimination {
 
         // find all uses of the input that the guard node dominates
         std::vector<Use> uses = input->uses();
-        while (uses.size() > 0) {
+        while (!uses.empty()) {
           auto use = uses.at(uses.size() - 1);
           uses.pop_back();
 
@@ -150,7 +139,7 @@ struct GuardElimination {
             continue;
           }
 
-          if (!isDominatedBy(use.user, n)) {
+          if (!use.user->isDominatedBy(n)) {
             continue;
           }
 
@@ -244,7 +233,7 @@ struct GuardElimination {
       if ((input->node()->kind() == prim::Guard &&
            !input->type()->expectRef<TensorType>().isSummarized()) ||
           input->node()->kind() == prim::Constant ||
-          (allow_numbers && input->type()->isSubtypeOf(NumberType::get())) ||
+          (allow_numbers && input->type()->isSubtypeOf(*NumberType::get())) ||
           except.count(i) != 0) {
         AT_ASSERT(
             input->node()->kind() != prim::Guard ||
@@ -473,5 +462,4 @@ void EliminateRedundantGuards(std::shared_ptr<Graph> graph) {
   ge.run();
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

@@ -9,8 +9,7 @@
 
 #define C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE 5
 
-namespace c10 {
-namespace impl {
+namespace c10::impl {
 
 // Packed container for TensorImpl sizes and strides.
 // This design improves on the previous approach of using a pair of
@@ -19,7 +18,8 @@ namespace impl {
 // the number of strides. The memory layout is as follows:
 //
 // 1 size_t for the size
-// 5 eightbytes of inline sizes and 5 eightbytes of inline strides, OR pointer to out-of-line array
+// 5 eightbytes of inline sizes and 5 eightbytes of inline strides, OR pointer
+// to out-of-line array
 class C10_API SizesAndStrides {
  public:
   // TODO: different iterator types for sizes & strides to prevent
@@ -29,17 +29,20 @@ class C10_API SizesAndStrides {
   using strides_iterator = int64_t*;
   using strides_const_iterator = const int64_t*;
 
-  SizesAndStrides() : size_(1) {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
+  SizesAndStrides() {
     size_at_unchecked(0) = 0;
     stride_at_unchecked(0) = 1;
   }
 
   ~SizesAndStrides() {
     if (C10_UNLIKELY(!isInline())) {
+      // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
       free(outOfLineStorage_);
     }
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   SizesAndStrides(const SizesAndStrides& rhs) : size_(rhs.size_) {
     if (C10_LIKELY(rhs.isInline())) {
       copyDataInline(rhs);
@@ -55,6 +58,7 @@ class C10_API SizesAndStrides {
     }
     if (C10_LIKELY(rhs.isInline())) {
       if (C10_UNLIKELY(!isInline())) {
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
         free(outOfLineStorage_);
       }
       copyDataInline(rhs);
@@ -89,12 +93,14 @@ class C10_API SizesAndStrides {
     }
     if (C10_LIKELY(rhs.isInline())) {
       if (C10_UNLIKELY(!isInline())) {
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
         free(outOfLineStorage_);
       }
       copyDataInline(rhs);
     } else {
       // They're outline. We're going to steal their vector.
       if (!isInline()) {
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
         free(outOfLineStorage_);
       }
       outOfLineStorage_ = rhs.outOfLineStorage_;
@@ -149,6 +155,11 @@ class C10_API SizesAndStrides {
   void set_sizes(IntArrayRef newSizes) {
     resize(newSizes.size());
     std::copy(newSizes.begin(), newSizes.end(), sizes_begin());
+  }
+
+  void set_strides(IntArrayRef strides) {
+    TORCH_INTERNAL_ASSERT(strides.size() == size());
+    std::copy(strides.begin(), strides.end(), strides_begin());
   }
 
   const int64_t* strides_data() const noexcept {
@@ -238,11 +249,16 @@ class C10_API SizesAndStrides {
     if (newSize == oldSize) {
       return;
     }
-    if (C10_LIKELY(newSize <= C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE && isInline())) {
+    if (C10_LIKELY(
+            newSize <= C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE && isInline())) {
       if (oldSize < newSize) {
-        const auto bytesToZero = (newSize - oldSize) * sizeof(inlineStorage_[0]);
+        const auto bytesToZero =
+            (newSize - oldSize) * sizeof(inlineStorage_[0]);
         memset(&inlineStorage_[oldSize], 0, bytesToZero);
-        memset(&inlineStorage_[C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE + oldSize], 0, bytesToZero);
+        memset(
+            &inlineStorage_[C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE + oldSize],
+            0,
+            bytesToZero);
       }
       size_ = newSize;
     } else {
@@ -267,27 +283,33 @@ class C10_API SizesAndStrides {
   }
 
   void allocateOutOfLineStorage(size_t size) {
-    outOfLineStorage_ = static_cast<int64_t *>(malloc(storageBytes(size)));
-    TORCH_CHECK(outOfLineStorage_, "Could not allocate memory for Tensor SizesAndStrides!");
+    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
+    outOfLineStorage_ = static_cast<int64_t*>(malloc(storageBytes(size)));
+    TORCH_CHECK(
+        outOfLineStorage_,
+        "Could not allocate memory for Tensor SizesAndStrides!");
   }
 
   void resizeOutOfLineStorage(size_t newSize) {
     TORCH_INTERNAL_ASSERT_DEBUG_ONLY(!isInline());
-    outOfLineStorage_ = static_cast<int64_t *>(realloc(outOfLineStorage_, storageBytes(newSize)));
-    TORCH_CHECK(outOfLineStorage_, "Could not allocate memory for Tensor SizesAndStrides!");
+    outOfLineStorage_ = static_cast<int64_t*>(
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
+        realloc(outOfLineStorage_, storageBytes(newSize)));
+    TORCH_CHECK(
+        outOfLineStorage_,
+        "Could not allocate memory for Tensor SizesAndStrides!");
   }
 
   void copyDataOutline(const SizesAndStrides& rhs) noexcept {
     memcpy(outOfLineStorage_, rhs.outOfLineStorage_, storageBytes(rhs.size_));
   }
 
-  size_t size_;
+  size_t size_{1};
   union {
-    int64_t *outOfLineStorage_;
+    int64_t* outOfLineStorage_;
+    // NOLINTNEXTLINE(*c-array*)
     int64_t inlineStorage_[C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE * 2]{};
   };
-
 };
 
-} // namespace impl
-} // namespace c10
+} // namespace c10::impl

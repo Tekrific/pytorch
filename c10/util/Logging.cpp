@@ -1,15 +1,19 @@
 #include <c10/util/Backtrace.h>
+#include <c10/util/CallOnce.h>
 #include <c10/util/Flags.h>
+#include <c10/util/Lazy.h>
 #include <c10/util/Logging.h>
+#include <c10/util/env.h>
 #ifdef FBCODE_CAFFE2
 #include <folly/synchronization/SanitizeThread.h>
 #endif
 
+#ifndef _WIN32
+#include <sys/time.h>
+#endif
+
 #include <algorithm>
-#include <cstdlib>
-#include <cstring>
 #include <iostream>
-#include <numeric>
 
 // Common code that we use regardless of whether we use glog or not.
 
@@ -22,16 +26,22 @@ C10_DEFINE_bool(
 namespace c10 {
 
 namespace {
-std::function<string(void)>* GetFetchStackTrace() {
-  static std::function<string(void)> func = []() {
-    return get_backtrace(/*frames_to_skip=*/1);
+std::function<::c10::Backtrace()>& GetFetchStackTrace() {
+  static std::function<::c10::Backtrace()> func = []() {
+    return get_lazy_backtrace(/*frames_to_skip=*/1);
   };
-  return &func;
-};
+  return func;
+}
 } // namespace
 
-void SetStackTraceFetcher(std::function<string(void)> fetcher) {
-  *GetFetchStackTrace() = fetcher;
+void SetStackTraceFetcher(std::function<::c10::Backtrace()> fetcher) {
+  GetFetchStackTrace() = std::move(fetcher);
+}
+
+void SetStackTraceFetcher(std::function<string()> fetcher) {
+  SetStackTraceFetcher([fetcher = std::move(fetcher)] {
+    return std::make_shared<PrecomputedLazyValue<std::string>>(fetcher());
+  });
 }
 
 void ThrowEnforceNotMet(
@@ -40,11 +50,11 @@ void ThrowEnforceNotMet(
     const char* condition,
     const std::string& msg,
     const void* caller) {
-  c10::Error e(file, line, condition, msg, (*GetFetchStackTrace())(), caller);
+  c10::Error e(file, line, condition, msg, GetFetchStackTrace()(), caller);
   if (FLAGS_caffe2_use_fatal_for_enforce) {
     LOG(FATAL) << e.msg();
   }
-  throw e;
+  throw std::move(e);
 }
 
 void ThrowEnforceNotMet(
@@ -63,7 +73,7 @@ void ThrowEnforceFiniteNotMet(
     const std::string& msg,
     const void* caller) {
   throw c10::EnforceFiniteError(
-      file, line, condition, msg, (*GetFetchStackTrace())(), caller);
+      file, line, condition, msg, GetFetchStackTrace()(), caller);
 }
 
 void ThrowEnforceFiniteNotMet(
@@ -72,53 +82,139 @@ void ThrowEnforceFiniteNotMet(
     const char* condition,
     const char* msg,
     const void* caller) {
-
   ThrowEnforceFiniteNotMet(file, line, condition, std::string(msg), caller);
 }
+
+namespace {
+
+class PyTorchStyleBacktrace : public OptimisticLazyValue<std::string> {
+ public:
+  PyTorchStyleBacktrace(SourceLocation source_location)
+      : backtrace_(GetFetchStackTrace()()), source_location_(source_location) {}
+
+ private:
+  std::string compute() const override {
+    return str(
+        "Exception raised from ",
+        source_location_,
+        " (most recent call first):\n",
+        backtrace_->get());
+  }
+
+  ::c10::Backtrace backtrace_;
+  SourceLocation source_location_;
+};
+
+} // namespace
+
 // PyTorch-style error message
 // (This must be defined here for access to GetFetchStackTrace)
 Error::Error(SourceLocation source_location, std::string msg)
     : Error(
           std::move(msg),
-          str("Exception raised from ",
-              source_location,
-              " (most recent call first):\n",
-              (*GetFetchStackTrace())())) {}
+          std::make_shared<PyTorchStyleBacktrace>(source_location)) {}
 
 using APIUsageLoggerType = std::function<void(const std::string&)>;
-using DDPUsageLoggerType = std::function<void(const c10::DDPLoggingData&)>;
+using APIUsageMetadataLoggerType = std::function<void(
+    const std::string&,
+    const std::map<std::string, std::string>& metadata_map)>;
+using DDPUsageLoggerType = std::function<void(const DDPLoggingData&)>;
 
 namespace {
 bool IsAPIUsageDebugMode() {
-  const char* val = getenv("PYTORCH_API_USAGE_STDERR");
-  return val && *val; // any non-empty value
+  auto val = c10::utils::get_env("PYTORCH_API_USAGE_STDERR");
+  return val.has_value() && !val.value().empty(); // any non-empty value
 }
 
 void APIUsageDebug(const string& event) {
   // use stderr to avoid messing with glog
-  std::cerr << "PYTORCH_API_USAGE " << event << std::endl;
+  std::cerr << "PYTORCH_API_USAGE " << event << '\n';
 }
 
 APIUsageLoggerType* GetAPIUsageLogger() {
   static APIUsageLoggerType func =
       IsAPIUsageDebugMode() ? &APIUsageDebug : [](const string&) {};
   return &func;
-};
+}
+
+APIUsageMetadataLoggerType* GetAPIUsageMetadataLogger() {
+  static APIUsageMetadataLoggerType func =
+      [](const std::string&,
+         const std::map<std::string, std::string>& metadata_map) {};
+  return &func;
+}
 
 DDPUsageLoggerType* GetDDPUsageLogger() {
-  static DDPUsageLoggerType func = [](const c10::DDPLoggingData&) {};
+  static DDPUsageLoggerType func = [](const DDPLoggingData&) {};
   return &func;
-};
+}
+
+auto& EventSampledHandlerRegistry() {
+  static auto& registry =
+      *new std::map<std::string, std::unique_ptr<EventSampledHandler>>();
+  return registry;
+}
+
 } // namespace
+
+void InitEventSampledHandlers(
+    std::vector<
+        std::pair<std::string_view, std::unique_ptr<EventSampledHandler>>>
+        handlers) {
+  static c10::once_flag flag;
+  c10::call_once(flag, [&]() {
+    auto& registry = EventSampledHandlerRegistry();
+    for (auto& [event, handler] : handlers) {
+      auto entry = registry.find(std::string{event});
+      if (entry == registry.end()) {
+        entry = registry.emplace(event, nullptr).first;
+      }
+      entry->second = std::move(handler);
+    }
+  });
+}
+
+const std::unique_ptr<EventSampledHandler>& GetEventSampledHandler(
+    std::string_view event) {
+  static std::mutex guard;
+  auto& registry = EventSampledHandlerRegistry();
+
+  // The getter can be executed from different threads.
+  std::lock_guard<std::mutex> lock(guard);
+  auto entry = registry.find(std::string{event});
+  if (entry == registry.end()) {
+    entry = registry.emplace(event, nullptr).first;
+  }
+  return entry->second;
+}
 
 void SetAPIUsageLogger(std::function<void(const std::string&)> logger) {
   TORCH_CHECK(logger);
-  *GetAPIUsageLogger() = logger;
+  *GetAPIUsageLogger() = std::move(logger);
 }
 
-void SetPyTorchDDPUsageLogger(std::function<void(const c10::DDPLoggingData&)> logger) {
+void SetAPIUsageMetadataLogger(
+    std::function<void(
+        const std::string&,
+        const std::map<std::string, std::string>& metadata_map)> logger) {
   TORCH_CHECK(logger);
-  *GetDDPUsageLogger() = logger;
+  *GetAPIUsageMetadataLogger() = std::move(logger);
+}
+
+void SetPyTorchDDPUsageLogger(
+    std::function<void(const DDPLoggingData&)> logger) {
+  TORCH_CHECK(logger);
+  *GetDDPUsageLogger() = std::move(logger);
+}
+
+static int64_t GLOBAL_RANK = -1;
+
+int64_t GetGlobalRank() {
+  return GLOBAL_RANK;
+}
+
+void SetGlobalRank(int64_t rank) {
+  GLOBAL_RANK = rank;
 }
 
 void LogAPIUsage(const std::string& event) try {
@@ -128,7 +224,16 @@ void LogAPIUsage(const std::string& event) try {
   // static destructor race
 }
 
-void LogPyTorchDDPUsage(const c10::DDPLoggingData& ddpData) try {
+void LogAPIUsageMetadata(
+    const std::string& context,
+    const std::map<std::string, std::string>& metadata_map) try {
+  if (auto logger = GetAPIUsageMetadataLogger())
+    (*logger)(context, metadata_map);
+} catch (std::bad_function_call&) {
+  // static destructor race
+}
+
+void LogPyTorchDDPUsage(const DDPLoggingData& ddpData) try {
   if (auto logger = GetDDPUsageLogger())
     (*logger)(ddpData);
 } catch (std::bad_function_call&) {
@@ -144,8 +249,13 @@ bool LogAPIUsageFakeReturn(const std::string& event) try {
   // static destructor race
   return true;
 }
-} // namespace detail
 
+namespace {
+
+void setLogLevelFlagFromEnv();
+
+} // namespace
+} // namespace detail
 } // namespace c10
 
 #if defined(C10_USE_GFLAGS) && defined(C10_USE_GLOG)
@@ -197,21 +307,39 @@ bool IsGoogleLoggingInitialized();
 } // namespace google
 
 namespace c10 {
-bool InitCaffeLogging(int* argc, char** argv) {
-  if (*argc == 0)
-    return true;
+namespace {
+
+void initGoogleLogging(char const* name) {
 #if !defined(_MSC_VER)
   // This trick can only be used on UNIX platforms
   if (!::google::glog_internal_namespace_::IsGoogleLoggingInitialized())
 #endif
   {
-    ::google::InitGoogleLogging(argv[0]);
+    ::google::InitGoogleLogging(name);
 #if !defined(_MSC_VER)
     // This is never defined on Windows
     ::google::InstallFailureSignalHandler();
 #endif
   }
+}
+
+} // namespace
+
+void initLogging() {
+  detail::setLogLevelFlagFromEnv();
+
   UpdateLoggingLevelsFromFlags();
+}
+
+bool InitCaffeLogging(int* argc, char** argv) {
+  if (*argc == 0) {
+    return true;
+  }
+
+  initGoogleLogging(argv[0]);
+
+  UpdateLoggingLevelsFromFlags();
+
   return true;
 }
 
@@ -251,6 +379,11 @@ C10_DEFINE_int(
     "The minimum log level that caffe2 will output.");
 
 namespace c10 {
+
+void initLogging() {
+  detail::setLogLevelFlagFromEnv();
+}
+
 bool InitCaffeLogging(int* argc, char** argv) {
   // When doing InitCaffeLogging, we will assume that caffe's flag parser has
   // already finished.
@@ -260,13 +393,12 @@ bool InitCaffeLogging(int* argc, char** argv) {
     std::cerr << "InitCaffeLogging() has to be called after "
                  "c10::ParseCommandLineFlags. Modify your program to make sure "
                  "of this."
-              << std::endl;
+              << '\n';
     return false;
   }
   if (FLAGS_caffe2_log_level > GLOG_FATAL) {
     std::cerr << "The log level of Caffe2 has to be no larger than GLOG_FATAL("
-              << GLOG_FATAL << "). Capping it to GLOG_FATAL."
-              << std::endl;
+              << GLOG_FATAL << "). Capping it to GLOG_FATAL." << '\n';
     FLAGS_caffe2_log_level = GLOG_FATAL;
   }
   return true;
@@ -289,26 +421,38 @@ MessageLogger::MessageLogger(const char* file, int line, int severity)
 #else // !ANDROID
   tag_ = "";
 #endif // ANDROID
-  /*
-  time_t rawtime;
-  struct tm * timeinfo;
+
+  time_t rawtime = 0;
   time(&rawtime);
-  timeinfo = localtime(&rawtime);
-  std::chrono::nanoseconds ns =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::high_resolution_clock::now().time_since_epoch());
-  */
-  stream_
-      << "["
-      << CAFFE2_SEVERITY_PREFIX[std::min(4, GLOG_FATAL - severity_)]
-      //<< (timeinfo->tm_mon + 1) * 100 + timeinfo->tm_mday
-      //<< std::setfill('0')
-      //<< " " << std::setw(2) << timeinfo->tm_hour
-      //<< ":" << std::setw(2) << timeinfo->tm_min
-      //<< ":" << std::setw(2) << timeinfo->tm_sec
-      //<< "." << std::setw(9) << ns.count() % 1000000000
-      << " " << c10::detail::StripBasename(std::string(file)) << ":" << line
-      << "] ";
+
+#ifndef _WIN32
+  struct tm raw_timeinfo = {0};
+  struct tm* timeinfo = &raw_timeinfo;
+  localtime_r(&rawtime, timeinfo);
+#else
+  // is thread safe on Windows
+  struct tm* timeinfo = localtime(&rawtime);
+#endif
+
+#ifndef _WIN32
+  // Get the current nanoseconds since epoch
+  struct timespec ts = {0};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  long ns = ts.tv_nsec;
+#else
+  long ns = 0;
+#endif
+
+  if (GLOBAL_RANK != -1) {
+    stream_ << "[rank" << GLOBAL_RANK << "]:";
+  }
+  stream_ << "[" << CAFFE2_SEVERITY_PREFIX[std::min(4, GLOG_FATAL - severity_)]
+          << (timeinfo->tm_mon + 1) * 100 + timeinfo->tm_mday
+          << std::setfill('0') << " " << std::setw(2) << timeinfo->tm_hour
+          << ":" << std::setw(2) << timeinfo->tm_min << ":" << std::setw(2)
+          << timeinfo->tm_sec << "." << std::setw(9) << ns << " "
+          << c10::detail::StripBasename(std::string(file)) << ":" << line
+          << "] ";
 }
 
 // Output the contents of the stream to the proper channel on destruction.
@@ -327,8 +471,7 @@ MessageLogger::~MessageLogger() {
       ANDROID_LOG_DEBUG, // VLOG(1)
       ANDROID_LOG_VERBOSE, // VLOG(2) .. VLOG(N)
   };
-  int android_level_index =
-      GLOG_FATAL - std::min(GLOG_FATAL, severity_);
+  int android_level_index = GLOG_FATAL - std::min(GLOG_FATAL, severity_);
   int level = android_log_levels[std::min(android_level_index, 5)];
   // Output the log string the Android log at the appropriate level.
   __android_log_print(level, tag_, "%s", stream_.str().c_str());
@@ -356,3 +499,51 @@ MessageLogger::~MessageLogger() {
 } // namespace c10
 
 #endif // !C10_USE_GLOG
+
+namespace c10::detail {
+namespace {
+
+void setLogLevelFlagFromEnv() {
+  auto level_env = c10::utils::get_env("TORCH_CPP_LOG_LEVEL");
+
+  // Not set, fallback to the default level (i.e. WARNING).
+  std::string level{level_env.has_value() ? level_env.value() : ""};
+  if (level.empty()) {
+    return;
+  }
+
+  std::transform(
+      level.begin(), level.end(), level.begin(), [](unsigned char c) {
+        return toupper(c);
+      });
+
+  if (level == "0" || level == "INFO") {
+    FLAGS_caffe2_log_level = 0;
+
+    return;
+  }
+  if (level == "1" || level == "WARNING") {
+    FLAGS_caffe2_log_level = 1;
+
+    return;
+  }
+  if (level == "2" || level == "ERROR") {
+    FLAGS_caffe2_log_level = 2;
+
+    return;
+  }
+  if (level == "3" || level == "FATAL") {
+    FLAGS_caffe2_log_level = 3;
+
+    return;
+  }
+
+  std::cerr
+      << "`TORCH_CPP_LOG_LEVEL` environment variable cannot be parsed. Valid values are "
+         "`INFO`, `WARNING`, `ERROR`, and `FATAL` or their numerical equivalents `0`, `1`, "
+         "`2`, and `3`."
+      << '\n';
+}
+
+} // namespace
+} // namespace c10::detail

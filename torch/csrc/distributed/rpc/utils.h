@@ -1,18 +1,14 @@
 #pragma once
 
 #include <c10/core/Device.h>
+#include <c10/core/Event.h>
+#include <c10/core/Stream.h>
 #include <torch/csrc/autograd/profiler.h>
 #include <torch/csrc/distributed/rpc/rpc_command_base.h>
 #include <torch/csrc/jit/serialization/pickle.h>
 #include <torch/csrc/utils/byte_order.h>
 
-namespace tensorpipe {
-class Message;
-} // namespace tensorpipe
-
-namespace torch {
-namespace distributed {
-namespace rpc {
+namespace torch::distributed::rpc {
 
 // Parse error message and return RPCErrorType based on the message.
 TORCH_API RPCErrorType getRPCErrorType(const JitFuture& jitFuture);
@@ -87,6 +83,4 @@ TORCH_API void populateRemoteProfiledEvents(
     const std::vector<std::vector<torch::autograd::profiler::LegacyEvent>>&
         eventLists);
 
-} // namespace rpc
-} // namespace distributed
-} // namespace torch
+} // namespace torch::distributed::rpc

@@ -5,9 +5,7 @@
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/csrc/utils/pybind.h>
 
-namespace torch {
-namespace distributed {
-namespace rpc {
+namespace torch::distributed::rpc {
 
 // Converts an internal ivalue::Future of Message into a user-facing
 // ivalue::Future of py::object type by creating a new ivalue::Future and call
@@ -18,7 +16,7 @@ namespace rpc {
 // discarded and then set the ivalue::Future using an empty IValue or the given
 // FutureError if there is an error.
 c10::intrusive_ptr<JitFuture> toPyJitFuture(
-    const std::shared_ptr<JitFuture>& messageJitFuture,
+    const c10::intrusive_ptr<JitFuture>& messageJitFuture,
     bool hasValue = true);
 
 c10::intrusive_ptr<JitFuture> pyRpcBuiltin(
@@ -65,6 +63,4 @@ PyRRef pyRemoteTorchscript(
     const py::args& args,
     const py::kwargs& kwargs);
 
-} // namespace rpc
-} // namespace distributed
-} // namespace torch
+} // namespace torch::distributed::rpc

@@ -1,18 +1,22 @@
 #pragma once
 
-#include <c10/macros/Macros.h>
-#include <c10/util/C++17.h>
-#include <c10/util/reverse_iterator.h>
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
+#include <functional>
+#include <iterator>
 #include <limits>
+#include <ostream>
 #include <stdexcept>
 #include <string>
-#include <algorithm>
+#include <string_view>
+
+#include <c10/macros/Macros.h>
 
 namespace c10 {
 
 /**
- * Reimplementation of std::string_view for C++11.
+ * Port of std::string_view with methods from C++20.
  * Implemented following the interface definition in
  * https://en.cppreference.com/w/cpp/string/basic_string_view
  * See there for the API documentation.
@@ -31,14 +35,14 @@ class basic_string_view final {
   using const_reference = const CharT&;
   using const_iterator = const CharT*;
   using iterator = const_iterator;
-  using const_reverse_iterator = c10::reverse_iterator<const_iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
   using reverse_iterator = const_reverse_iterator;
   using size_type = std::size_t;
   using difference_type = std::ptrdiff_t;
 
   static constexpr size_type npos = size_type(-1);
 
-  constexpr basic_string_view() noexcept : begin_(nullptr), size_(0) {}
+  constexpr basic_string_view() noexcept : begin_(nullptr) {}
 
   explicit constexpr basic_string_view(const_pointer str, size_type count)
       : begin_(str), size_(count) {}
@@ -49,6 +53,9 @@ class basic_string_view final {
   /* implicit */ basic_string_view(const ::std::basic_string<CharT>& str)
       : basic_string_view(str.data(), str.size()) {}
 
+  /* implicit */ basic_string_view(const ::std::basic_string_view<CharT>& str)
+      : basic_string_view(str.data(), str.size()) {}
+
   constexpr basic_string_view(const basic_string_view&) noexcept = default;
 
   constexpr basic_string_view& operator=(
@@ -56,6 +63,10 @@ class basic_string_view final {
     begin_ = rhs.begin_;
     size_ = rhs.size_;
     return *this;
+  }
+
+  operator ::std::basic_string_view<CharT>() const {
+    return ::std::basic_string_view<CharT>(data(), size());
   }
 
   explicit operator ::std::basic_string<CharT>() const {
@@ -103,7 +114,8 @@ class basic_string_view final {
   }
 
   constexpr const_reference operator[](size_type pos) const {
-    return at(pos);
+    // TODO: split out
+    return at_(pos);
   }
 
   constexpr const_reference at(size_type pos) const {
@@ -112,7 +124,7 @@ class basic_string_view final {
     return C10_UNLIKELY(pos >= size_)
         ? (throw std::out_of_range(
                "string_view::operator[] or string_view::at() out of range. Index: " +
-               c10::guts::to_string(pos) + ", size: " + c10::guts::to_string(size())),
+               std::to_string(pos) + ", size: " + std::to_string(size())),
            at_(0))
         : at_(pos);
 #else
@@ -148,26 +160,26 @@ class basic_string_view final {
     return size() == 0;
   }
 
-  CONSTEXPR_EXCEPT_GCC5 void remove_prefix(size_type n) {
+  constexpr void remove_prefix(size_type n) {
     if (n > size()) {
       throw std::out_of_range(
           "basic_string_view::remove_prefix: out of range. PrefixLength: " +
-          c10::guts::to_string(n) + ", size: " + c10::guts::to_string(size()));
+          std::to_string(n) + ", size: " + std::to_string(size()));
     }
     begin_ += n;
     size_ -= n;
   }
 
-  CONSTEXPR_EXCEPT_GCC5 void remove_suffix(size_type n) {
+  constexpr void remove_suffix(size_type n) {
     if (n > size()) {
       throw std::out_of_range(
           "basic_string_view::remove_suffix: out of range. SuffixLength: " +
-          c10::guts::to_string(n) + ", size: " + c10::guts::to_string(size()));
+          std::to_string(n) + ", size: " + std::to_string(size()));
     }
     size_ -= n;
   }
 
-  CONSTEXPR_EXCEPT_GCC5 void swap(basic_string_view& sv) noexcept {
+  constexpr void swap(basic_string_view& sv) noexcept {
     auto tmp = *this;
     *this = sv;
     sv = tmp;
@@ -177,10 +189,9 @@ class basic_string_view final {
     if (pos > size_) {
       throw std::out_of_range(
           "basic_string_view::copy: out of range. Index: " +
-          c10::guts::to_string(pos) +
-          ", size: " + c10::guts::to_string(size()));
+          std::to_string(pos) + ", size: " + std::to_string(size()));
     }
-    size_type copy_length = guts::min(count, size_ - pos);
+    size_type copy_length = std::min(count, size_ - pos);
     for (auto iter = begin() + pos, end = iter + copy_length; iter != end;) {
       *(dest++) = *(iter++);
     }
@@ -194,7 +205,7 @@ class basic_string_view final {
     return (pos > size_)
         ? (throw std::out_of_range(
                "basic_string_view::substr parameter out of bounds. Index: " +
-               c10::guts::to_string(pos) + ", size: " + c10::guts::to_string(size())),
+               std::to_string(pos) + ", size: " + std::to_string(size())),
            substr_())
         : substr_(pos, count);
 #else
@@ -203,9 +214,8 @@ class basic_string_view final {
   }
 
   constexpr int compare(basic_string_view rhs) const noexcept {
-#if __cpp_constexpr >= 201304
-    // if we are in C++14, write it iteratively. This is faster.
-    for (size_t i = 0, end = guts::min(size(), rhs.size()); i < end; ++i) {
+    // Write it iteratively. This is faster.
+    for (size_t i = 0, end = std::min(size(), rhs.size()); i < end; ++i) {
       if (at_(i) < rhs.at_(i)) {
         return -1;
       } else if (at_(i) > rhs.at_(i)) {
@@ -218,18 +228,6 @@ class basic_string_view final {
       return 1;
     }
     return 0;
-#else
-    // if we are in C++11, we need to do it recursively because of constexpr
-    // restrictions.
-    return (size() == 0 && rhs.size() == 0) ? 0
-                                            : (size() == 0) ? -1
-                                                            : (rhs.size() == 0)
-                ? 1
-                : (front() < rhs.front()) ? -1
-                                          : (front() > rhs.front())
-                        ? 1
-                        : substr_(1).compare(rhs.substr_(1));
-#endif
   }
 
   constexpr int compare(size_type pos1, size_type count1, basic_string_view v)
@@ -326,10 +324,8 @@ class basic_string_view final {
     return ends_with(basic_string_view(suffix));
   }
 
-  constexpr size_type find(basic_string_view v, size_type pos = 0) const
-      noexcept {
-#if __cpp_constexpr >= 201304
-    // if we are in C++14, write it iteratively. This is faster.
+  constexpr size_type find(basic_string_view v, size_type pos = 0)
+      const noexcept {
     if (v.size() == 0) {
       return pos <= size() ? pos : npos;
     }
@@ -343,17 +339,6 @@ class basic_string_view final {
       }
     }
     return npos;
-#else
-    // if we are in C++11, we need to do it recursively because of constexpr
-    // restrictions.
-    return (v.size() == 0) ? (pos <= size() ? pos : npos)
-                           : (pos + v.size() > size())
-            ? npos
-            : (v.at_(0) == at_(pos) &&
-               v.substr_(1).equals_(substr_(pos + 1, v.size() - 1)))
-                ? pos
-                : find(v, pos + 1);
-#endif
   }
 
   constexpr size_type find(CharT ch, size_type pos = 0) const noexcept {
@@ -369,16 +354,15 @@ class basic_string_view final {
     return find(basic_string_view(s), pos);
   }
 
-  constexpr size_type rfind(basic_string_view v, size_type pos = npos) const
-      noexcept {
-#if __cpp_constexpr >= 201304
-    // if we are in C++14, write it iteratively. This is faster.
+  constexpr size_type rfind(basic_string_view v, size_type pos = npos)
+      const noexcept {
+    // Write it iteratively. This is faster.
     if (v.size() == 0) {
       return pos <= size() ? pos : size();
     }
 
     if (v.size() <= size()) {
-      pos = guts::min(size() - v.size(), pos);
+      pos = std::min(size() - v.size(), pos);
       do {
         if (v.at_(0) == at_(pos) &&
             v.substr_(1).equals_(substr_(pos + 1, v.size() - 1))) {
@@ -387,18 +371,6 @@ class basic_string_view final {
       } while (pos-- > 0);
     }
     return npos;
-#else
-    // if we are in C++11, we need to do it recursively because of constexpr
-    // restrictions.
-    return (v.size() == 0) ? (pos <= size() ? pos : size())
-                           : (v.size() > size()) ? npos
-                                                 : (size() - v.size() < pos)
-                ? rfind(v, size() - v.size())
-                : (v.at_(0) == at_(pos) &&
-                   v.substr_(1).equals_(substr_(pos + 1, v.size() - 1)))
-                    ? pos
-                    : (pos == 0) ? npos : rfind(v, pos - 1);
-#endif
   }
 
   constexpr size_type rfind(CharT ch, size_type pos = npos) const noexcept {
@@ -419,8 +391,8 @@ class basic_string_view final {
     return find_first_if_(pos, stringViewContainsChar_{v});
   }
 
-  constexpr size_type find_first_of(CharT ch, size_type pos = 0) const
-      noexcept {
+  constexpr size_type find_first_of(CharT ch, size_type pos = 0)
+      const noexcept {
     return find_first_if_(pos, charIsEqual_{ch});
   }
 
@@ -440,8 +412,8 @@ class basic_string_view final {
     return find_last_if_(pos, stringViewContainsChar_{v});
   }
 
-  constexpr size_type find_last_of(CharT ch, size_type pos = npos) const
-      noexcept {
+  constexpr size_type find_last_of(CharT ch, size_type pos = npos)
+      const noexcept {
     return find_last_if_(pos, charIsEqual_{ch});
   }
 
@@ -462,8 +434,8 @@ class basic_string_view final {
     return find_first_if_(pos, stringViewDoesNotContainChar_{v});
   }
 
-  constexpr size_type find_first_not_of(CharT ch, size_type pos = 0) const
-      noexcept {
+  constexpr size_type find_first_not_of(CharT ch, size_type pos = 0)
+      const noexcept {
     return find_first_if_(pos, charIsNotEqual_{ch});
   }
 
@@ -485,8 +457,8 @@ class basic_string_view final {
     return find_last_if_(pos, stringViewDoesNotContainChar_{v});
   }
 
-  constexpr size_type find_last_not_of(CharT ch, size_type pos = npos) const
-      noexcept {
+  constexpr size_type find_last_not_of(CharT ch, size_type pos = npos)
+      const noexcept {
     return find_last_if_(pos, charIsNotEqual_{ch});
   }
 
@@ -504,18 +476,11 @@ class basic_string_view final {
 
  private:
   static constexpr size_type strlen_(const_pointer str) noexcept {
-#if __cpp_constexpr >= 201304
-    // if we are in C++14, write it iteratively. This is faster.
     const_pointer current = str;
     while (*current != '\0') {
       ++current;
     }
     return current - str;
-#else
-    // if we are in C++11, we need to do it recursively because of constexpr
-    // restrictions.
-    return (*str == '\0') ? 0 : 1 + strlen_(str + 1);
-#endif
   }
 
   constexpr const_reference at_(size_type pos) const noexcept {
@@ -524,14 +489,13 @@ class basic_string_view final {
 
   constexpr basic_string_view substr_(size_type pos = 0, size_type count = npos)
       const {
-    return basic_string_view{begin_ + pos, guts::min(count, size() - pos)};
+    return basic_string_view{begin_ + pos, std::min(count, size() - pos)};
   }
 
   template <class Condition>
-  constexpr size_type find_first_if_(size_type pos, Condition&& condition) const
-      noexcept {
-#if __cpp_constexpr >= 201304
-    // if we are in C++14, write it iteratively. This is faster.
+  // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
+  constexpr size_type find_first_if_(size_type pos, Condition&& condition)
+      const noexcept {
     if (pos + 1 <= size()) {
       for (size_type cur = pos; cur < size(); ++cur) {
         if (condition(at_(cur))) {
@@ -540,23 +504,15 @@ class basic_string_view final {
       }
     }
     return npos;
-#else
-    // if we are in C++11, we need to do it recursively because of constexpr
-    // restrictions.
-    return (pos + 1 > size()) ? npos
-                              : condition(at_(pos))
-            ? pos
-            : find_first_if_(pos + 1, std::forward<Condition>(condition));
-#endif
   }
 
   template <class Condition>
-  constexpr size_type find_last_if_(size_type pos, Condition&& condition) const
-      noexcept {
-#if __cpp_constexpr >= 201304
-    // if we are in C++14, write it iteratively. This is faster.
+  // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
+  constexpr size_type find_last_if_(size_type pos, Condition&& condition)
+      const noexcept {
+    // Write it iteratively. This is faster.
     if (size() > 0) {
-      pos = guts::min(size() - 1, pos);
+      pos = std::min(size() - 1, pos);
       do {
         if (condition(at_(pos))) {
           return pos;
@@ -564,27 +520,15 @@ class basic_string_view final {
       } while (pos-- > 0);
     }
     return npos;
-#else
-    // if we are in C++11, we need to do it recursively because of constexpr
-    // restrictions.
-    return (size() == 0) ? npos
-                         : (pos >= size())
-            ? find_last_if_(size() - 1, std::forward<Condition>(condition))
-            : condition(at_(pos))
-                ? pos
-                : (pos == 0) ? npos
-                             : find_last_if_(
-                                   pos - 1, std::forward<Condition>(condition));
-#endif
   }
 
   constexpr bool equals_(basic_string_view rhs) const {
-    // We don't use string_view::compare() here but implement it manually because
-    // only looking at equality allows for more optimized code.
-#if defined(__GNUC__)
-    return size() == rhs.size() && 0 == __builtin_memcmp(data(), rhs.data(), size());
-#elif __cpp_constexpr >= 201304
-    // if we are in C++14, write it iteratively. This is faster than the recursive C++11 implementation below.
+    // We don't use string_view::compare() here but implement it manually
+    // because only looking at equality allows for more optimized code.
+#if defined(__GNUC__) && !defined(__CUDACC__)
+    return size() == rhs.size() &&
+        0 == __builtin_memcmp(data(), rhs.data(), size());
+#else
     if (size() != rhs.size()) {
       return false;
     }
@@ -599,14 +543,6 @@ class basic_string_view final {
       }
     }
     return true;
-#else
-    // if we are in C++11, we need to do it recursively because of constexpr
-    // restrictions.
-    return (size() != rhs.size()) ? false
-                                  : (size() == 0)
-            ? true
-            : (front() != rhs.front()) ? false
-                                       : (substr_(1).equals_(rhs.substr_(1)));
 #endif
   }
 
@@ -639,30 +575,27 @@ class basic_string_view final {
   };
 
   const_pointer begin_;
-  size_type size_;
+  size_type size_{};
 };
-
-template <class CharT>
-const typename basic_string_view<CharT>::size_type basic_string_view<CharT>::npos;
 
 template <class CharT>
 inline std::basic_ostream<CharT>& operator<<(
     std::basic_ostream<CharT>& stream,
     basic_string_view<CharT> sv) {
-  // The rules for operator<< are quite complex, but std::string has the same.
-  // Let's just rely on the std::string implementation. This might be a bit
-  // slower, but I don't think performance matters here.
-  return stream << ::std::basic_string<CharT>(sv);
+  // The rules for operator<< are quite complex, so lets defer to the
+  // STL implementation.
+  using std_string_type = ::std::basic_string_view<CharT>;
+  return stream << std_string_type(sv.data(), sv.size());
 }
 
 template <class CharT>
-CONSTEXPR_EXCEPT_GCC5 inline void swap(
+constexpr inline void swap(
     basic_string_view<CharT>& lhs,
-    basic_string_view<CharT>& rhs) {
+    basic_string_view<CharT>& rhs) noexcept {
   lhs.swap(rhs);
 }
-
-using string_view = basic_string_view<char>;
+using std::string_view;
+using string_view_ext = basic_string_view<char>;
 
 } // namespace c10
 
@@ -670,14 +603,14 @@ namespace std {
 template <class CharT>
 struct hash<::c10::basic_string_view<CharT>> {
   size_t operator()(::c10::basic_string_view<CharT> x) const {
-    // The standard says that std""string_view hashing must do the same as
+    // The standard says that std::string_view hashing must do the same as
     // std::string hashing but leaves the details of std::string hashing
-    // up to the implementer. So, to be conformant, we need to have the same
-    // behavior as the implementer-defined std::string hasher of the STL
-    // we're built against. Let's just call it. This is probably slow
-    // but the only way to be conformant.
-    return std::hash<::std::basic_string<CharT>>()(
-        ::std::basic_string<CharT>(x));
+    // up to the implementer. So, to be conformant, we need to re-use and
+    // existing STL type's hash function. The std::string fallback is probably
+    // slow but the only way to be conformant.
+
+    using std_string_type = ::std::basic_string_view<CharT>;
+    return ::std::hash<std_string_type>{}(std_string_type(x.data(), x.size()));
   }
 };
 } // namespace std

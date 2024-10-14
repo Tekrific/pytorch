@@ -1,5 +1,8 @@
-import torch
+# Owner(s): ["oncall: jit"]
+
 from typing import List, Tuple
+
+import torch
 
 
 class SubmoduleNoForwardInputs(torch.nn.Module):
@@ -46,7 +49,7 @@ class ModuleForwardSingleInput(torch.nn.Module):
         return self.submodule(input)
 
 
-class ModuleDirectFowardSubmodCall(torch.nn.Module):
+class ModuleDirectforwardSubmodCall(torch.nn.Module):
     def __init__(self, name: str, submodule_name: str):
         super().__init__()
         self.name = name

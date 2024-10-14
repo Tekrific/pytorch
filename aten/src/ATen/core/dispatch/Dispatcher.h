@@ -9,17 +9,30 @@
 #include <ATen/record_function.h>
 #include <c10/util/Exception.h>
 #include <c10/util/LeftRight.h>
-#include <mutex>
 #include <list>
+#include <mutex>
+#include <condition_variable>
+#include <type_traits>
+#include <c10/core/SafePyObject.h>
 
 #include <ATen/core/grad_mode.h>
+#include <ATen/core/enum_tag.h>
 
-#if C10_MOBILE
-#define C10_DISPATCHER_INLINE_UNLESS_MOBILE inline
-#else
-#define C10_DISPATCHER_INLINE_UNLESS_MOBILE C10_ALWAYS_INLINE
+#ifndef NDEBUG
+#include <iostream>
 #endif
+
 namespace c10 {
+
+TORCH_API bool show_dispatch_trace();
+TORCH_API void dispatch_trace_nesting_incr();
+TORCH_API void dispatch_trace_nesting_decr();
+TORCH_API int64_t dispatch_trace_nesting_value();
+
+struct DispatchTraceNestingGuard {
+  DispatchTraceNestingGuard() { dispatch_trace_nesting_incr(); }
+  ~DispatchTraceNestingGuard() { dispatch_trace_nesting_decr(); }
+};
 
 class TORCH_API OperatorHandle;
 template<class FuncType> class TypedOperatorHandle;
@@ -77,6 +90,12 @@ private:
   friend class OperatorHandle;
   template<class> friend class TypedOperatorHandle;
 
+  struct Guard final {
+    Guard() : alive(true), mutex() {}
+    std::atomic<bool> alive;
+    std::mutex mutex;
+  };
+
 public:
   ~Dispatcher();
 
@@ -118,7 +137,7 @@ public:
    * and returns it if it is registered WITH A SCHEMA.
    * Returns nullopt otherwise.
    */
-  c10::optional<OperatorHandle> findSchema(const OperatorName& operator_name);
+  std::optional<OperatorHandle> findSchema(const OperatorName& operator_name);
 
   /**
    * Variant of findSchema that results in less code generated at the call site.
@@ -136,7 +155,10 @@ public:
   OperatorHandle findSchemaOrThrow(const char* name, const char* overload_name);
 
   // Like findSchema, but also returns OperatorHandle even if there is no schema
-  c10::optional<OperatorHandle> findOp(const OperatorName& operator_name);
+  std::optional<OperatorHandle> findOp(const OperatorName& operator_name);
+
+  // Returns a list of all operator names present in the operatorLookupTable_
+  const std::vector<OperatorName> getAllOpNames();
 
   // ------------------------------------------------------------------------
   //
@@ -149,7 +171,7 @@ public:
 
 
   template<class Return, class... Args>
-  static Return callWithDispatchKeySlowPath(const TypedOperatorHandle<Return (Args...)>& op, bool pre_sampled, DispatchKeySet dispatchKeySet, const KernelFunction& kernel, Args... args);
+  static Return callWithDispatchKeySlowPath(const TypedOperatorHandle<Return (Args...)>& op, at::StepCallbacks& stepCallbacks, DispatchKeySet dispatchKeySet, const KernelFunction& kernel, Args... args);
 
   // Like call, but intended for use in a redispatch in kernels that have explicitly performed the DispatchKey update calculatulation.
   // This will take the DispatchKeySet completely as is and dispatch to the kernel of the corresponding highest priority key in the set.
@@ -160,11 +182,21 @@ public:
 
   // Invoke an operator via the boxed calling convention using an IValue stack
   void callBoxed(const OperatorHandle& op, Stack* stack) const;
+  void callBoxedForDispatchKey(const OperatorHandle& op, DispatchKey dk, Stack* stack) const;
 
   // TODO: This will only be useful if we write a backend fallback that plumbs dispatch keys (currently there are none)
   // See Note [Plumbing Keys Through The Dispatcher]
   void redispatchBoxed(const OperatorHandle& op, DispatchKeySet dispatchKeySet, Stack* stack) const;
 
+  bool hasBackendFallbackForDispatchKey(DispatchKey dk) {
+    auto dispatch_ix = getDispatchTableIndexForDispatchKey(dk);
+    if (dispatch_ix < 0) return false;
+    return backendFallbackKernels_[dispatch_ix].kernel.isValid();
+  }
+
+  // Used by torchdeploy/multipy for multiple interpreters racing.
+  void waitForDef(const FunctionSchema& schema);
+  void waitForImpl(const OperatorName& op_name, std::optional<DispatchKey> dispatch_key);
 
   // ------------------------------------------------------------------------
   //
@@ -178,7 +210,7 @@ public:
    * If a schema with the same operator name and overload name already exists,
    * this function will check that both schemas are exactly identical.
    */
-  RegistrationHandleRAII registerDef(FunctionSchema schema, std::string debug);
+  RegistrationHandleRAII registerDef(FunctionSchema schema, std::string debug, std::vector<at::Tag> tags = {});
 
   /**
    * Register a kernel to the dispatch table for an operator.
@@ -189,7 +221,20 @@ public:
    */
   // NB: steals the inferred function schema, as we may need to hold on to
   // it for a bit until the real schema turns up
-  RegistrationHandleRAII registerImpl(OperatorName op_name, c10::optional<DispatchKey> dispatch_key, KernelFunction kernel, c10::optional<impl::CppSignature> cpp_signature, std::unique_ptr<FunctionSchema> inferred_function_schema, std::string debug);
+  RegistrationHandleRAII registerImpl(OperatorName op_name, std::optional<DispatchKey> dispatch_key, KernelFunction kernel, std::optional<impl::CppSignature> cpp_signature, std::unique_ptr<FunctionSchema> inferred_function_schema, std::string debug);
+
+  /**
+   * Given an operator, tells the Dispatcher that we have implemented a fake impl
+   * for this op in the given Python module. Call this a "pystub".
+   */
+  RegistrationHandleRAII registerPythonModule(const OperatorName& op_name, const char* pymodule, const char* context);
+
+  /**
+   * Given an operator, throws if we have a pystub.
+   */
+  void throwIfHasPythonModule(OperatorName op_name);
+
+  std::optional<std::pair<const char*, const char*>> getPyStub(OperatorName op_name);
 
   /**
    * Register a new operator by name.
@@ -249,13 +294,25 @@ public:
    */
   std::vector<OperatorHandle> findDanglingImpls() const;
 
+  /**
+   * Useful for inspecting global Dispatcher registration state.
+   * Returns the names of all operators with a kernel registered for the specified DispatchKey.
+   * If no DispatchKey is specified, it returns all registered operators.
+   */
+  std::vector<OperatorName> getRegistrationsForDispatchKey(std::optional<DispatchKey> k) const;
+
 private:
   Dispatcher();
 
-  static int64_t sequenceNumberForRunningRecordFunction(DispatchKey dispatchKey);
-  static void runRecordFunction(at::RecordFunction& guard, const OperatorHandle& op, DispatchKey dispatchKey);
-  static void runRecordFunction(at::RecordFunction& guard, const OperatorHandle& op, DispatchKey dispatchKey, torch::jit::Stack &&stack);
-  static void runRecordFunction(at::RecordFunction& guard, const OperatorHandle& op, DispatchKey dispatchKey, const torch::jit::Stack &stack);
+  static int64_t sequenceNumberForRunningRecordFunction(DispatchKey dispatchKey, DispatchKeySet dispatchKeySet);
+  static void runRecordFunction(at::RecordFunction& guard, at::RecordFunction::schema_ref_t schema_ref, DispatchKey dispatchKey, DispatchKeySet dispatchKeySet);
+  static void runRecordFunction(at::RecordFunction& guard, at::RecordFunction::schema_ref_t schema_ref, DispatchKey dispatchKey, DispatchKeySet dispatchKeySet, c10::ArrayRef<const c10::IValue> args);
+
+  #ifdef FBCODE_CAFFE2
+  static bool profilingOperatorEvents();
+  static void fireOpStartUSDT(at::RecordFunction::schema_ref_t schema_ref);
+  static void fireOpEndUSDT(at::RecordFunction::schema_ref_t schema_ref);
+  #endif // FBCODE_CAFFE2
 
   OperatorHandle findOrRegisterSchema_(FunctionSchema&& schema);
   OperatorHandle findOrRegisterName_(const OperatorName& op_name);
@@ -264,8 +321,8 @@ private:
   void deregisterImpl_(
     const OperatorHandle& op,
     const OperatorName& op_name,
-    c10::optional<DispatchKey> dispatch_key,
-    std::list<impl::AnnotatedKernel>::iterator kernel_handle);
+    std::optional<DispatchKey> dispatch_key,
+    impl::OperatorEntry::AnnotatedKernelContainerIterator kernel_handle);
   void deregisterName_(const OperatorHandle& op, const OperatorName& op_name);
   void deregisterFallback_(DispatchKey dispatchKey);
   void deregisterLibrary_(const std::string& ns);
@@ -273,14 +330,37 @@ private:
   void checkSchemaCompatibility(const OperatorHandle& op, const FunctionSchema& schema, const std::string& debug);
 
   std::list<OperatorDef> operators_;
+#if !defined(C10_MOBILE)
   LeftRight<ska::flat_hash_map<OperatorName, OperatorHandle>> operatorLookupTable_;
+#else
+  RWSafeLeftRightWrapper<ska::flat_hash_map<OperatorName, OperatorHandle>> operatorLookupTable_;
+#endif
   // Map from namespace to debug string (saying, e.g., where the library was defined)
   ska::flat_hash_map<std::string, std::string> libraries_;
 
-  std::array<impl::AnnotatedKernel, static_cast<uint8_t>(DispatchKey::NumDispatchKeys)> backendFallbackKernels_;
+  std::array<impl::AnnotatedKernel, num_runtime_entries> backendFallbackKernels_;
 
   std::unique_ptr<detail::RegistrationListenerList> listeners_;
-  std::mutex mutex_;
+
+  // This condition variable gets notified whenever we add a new def/impl to the
+  // dispatch table.  This is primarily used by multipy/torchdeploy, when
+  // we have multiple interpreters trying to register to the dispatch table.
+  // In this situation, whenever the non-primary interpreter would have tried
+  // to register to the dispatch table, instead it will check to see if the
+  // expected registration has already been made, and if it hasn't, wait on
+  // this condition variable to see if it was just racing with the primary
+  // interpreter.
+  //
+  // We expect it to be rare for there to be any waiters on this condition
+  // variable.  This is mostly just to help give better diagnostics if
+  // something goes horribly wrong
+  std::condition_variable cond_var_;
+
+  // Protect concurrent access to the dispatcher.  We store this in a
+  // `shared_ptr` as we return callbacks that call back into dispatcher methods,
+  // and we need to be able to handle and guard against the event when the
+  // `Dispatcher` has been destroyed before the callbacks fire.
+  std::shared_ptr<Guard> guard_;
 };
 
 /**
@@ -289,11 +369,15 @@ private:
  * to lookup a kernel for a certain set of arguments.
  */
 class TORCH_API OperatorHandle {
+  template <typename T> friend struct std::hash;
+
 public:
   OperatorHandle(OperatorHandle&&) noexcept = default;
   OperatorHandle& operator=(OperatorHandle&&) noexcept = default;
   OperatorHandle(const OperatorHandle&) = default;
   OperatorHandle& operator=(const OperatorHandle&) = default;
+  // NOLINTNEXTLINE(performance-trivially-destructible)
+  ~OperatorHandle();
 
   const OperatorName& operator_name() const {
     return operatorDef_->op.operator_name();
@@ -315,12 +399,45 @@ public:
     return operatorDef_->op.dumpState();
   }
 
+  bool hasKernelForDispatchKey(DispatchKey k) const {
+    return operatorDef_->op.hasKernelForDispatchKey(k);
+  }
+
+  bool isKernelFallthroughKernel(DispatchKey k) const {
+    return operatorDef_->op.kernelForDispatchKey(k).isFallthrough();
+  }
+
+  bool hasKernelForAnyDispatchKey(DispatchKeySet k) const {
+    return operatorDef_->op.hasKernelForAnyDispatchKey(k);
+  }
+
+  bool hasComputedKernelForDispatchKey(DispatchKey k) const {
+    return operatorDef_->op.hasComputedKernelForDispatchKey(k);
+  }
+
   std::string dumpComputedTable() const {
     return operatorDef_->op.dumpComputedTable();
   }
 
   void checkInvariants() const {
     return operatorDef_->op.checkInvariants();
+  }
+
+  c10::ArrayRef<at::Tag> getTags() const {
+    return operatorDef_->op.getTags();
+  }
+
+  void setReportErrorCallback_(std::unique_ptr<c10::SafePyObject> callback) {
+    operatorDef_->op.setReportErrorCallback_(std::move(callback));
+  }
+
+  bool hasTag(const at::Tag& tag) const {
+    for(const auto& tag_: getTags()) {
+      if (tag == tag_) {
+        return true;
+      }
+    }
+    return false;
   }
 
   template<class FuncType>
@@ -333,6 +450,9 @@ public:
     // will be done by the time a typed() handle is acquired.
 #if !defined C10_MOBILE
     operatorDef_->op.assertSignatureIsCorrect<FuncType>();
+    if (fn_has_symint<FuncType>::value) {
+      operatorDef_->op.assertSignatureIsCorrect<typename fn_remove_symint<FuncType>::type>();
+    }
 #endif
     return TypedOperatorHandle<FuncType>(operatorIterator_);
   }
@@ -341,8 +461,29 @@ public:
     c10::Dispatcher::singleton().callBoxed(*this, stack);
   }
 
+  void callBoxed(Stack& stack) const {
+    callBoxed(&stack);
+  }
+
+  void callBoxedForDispatchKey(DispatchKey dk, Stack& stack) const {
+    c10::Dispatcher::singleton().callBoxedForDispatchKey(*this, dk, &stack);
+  }
+
   void redispatchBoxed(DispatchKeySet ks, Stack* stack) const {
     c10::Dispatcher::singleton().redispatchBoxed(*this, ks, stack);
+  }
+
+  template <typename F>
+  PyObject* getPythonOp(c10::impl::PyInterpreter* self_interpreter, F slow_accessor) const {
+    return operatorDef_->op.getPythonOp(self_interpreter, slow_accessor);
+  }
+
+  bool operator==(const OperatorHandle& other) const {
+    return operatorDef_ == other.operatorDef_;
+  }
+
+  bool operator!=(const OperatorHandle& other) const {
+    return operatorDef_ != other.operatorDef_;
   }
 
 private:
@@ -402,57 +543,160 @@ private:
 };
 
 namespace detail {
-template<class... Args> inline void unused_arg_(const Args&...) {}
+template <class... Args> inline void unused_arg_(const Args&...) {}
+
+// CaptureKernelCall is intended to capture return values from Dispatcher
+// unboxed kernel calls. A record function may request to get outputs from the
+// kernel calls. For boxed kernels, it's straightforward, the returned values
+// are in the stack object. The stack can be passed to record functions. For
+// unboxed kernels, we need to handle different kinds of return values, cache
+// them temporarily, then release the values for the actual function call
+// return.
+template <typename ReturnType>
+struct CaptureKernelCall {
+  template <typename F, typename... Args>
+  CaptureKernelCall(
+      const F& kernel,
+      const TypedOperatorHandle<ReturnType(Args...)>& op,
+      const DispatchKeySet& dispatchKeySet,
+      Args&&... args)
+      // Calls the kernel and capture the result in output_.
+      : output_{kernel.template call<ReturnType, Args...>(
+            op,
+            dispatchKeySet,
+            std::forward<Args>(args)...)} {}
+  // Wraps the return values in a Stack.
+  Stack getOutputs() {
+    Stack stack;
+    impl::push_outputs<ReturnType, false>::copy(output_, &stack);
+    return stack;
+  }
+  // Since we are returning the output_, we don't expect the output_ to be used
+  // afterward. Copy elision and RVO do not apply to class data members. Using
+  // move semantic to avoid copies when possible.
+  ReturnType release() && {
+    return std::move(output_);
+  }
+
+ private:
+  ReturnType output_;
+};
+
+// Handle the lvalue reference differently since it should not be moved.
+template <>
+inline at::Tensor& CaptureKernelCall<at::Tensor&>::release() && {
+  return output_;
 }
+
+// Handle case where the kernel returns void.
+template <>
+struct CaptureKernelCall<void> {
+  template <typename F, typename... Args>
+  CaptureKernelCall(
+      const F& kernel,
+      const TypedOperatorHandle<void(Args...)>& op,
+      const DispatchKeySet& dispatchKeySet,
+      Args&&... args) {
+    // Calling the kernel and no need to capture void.
+    kernel.template call<void, Args...>(
+        op, dispatchKeySet, std::forward<Args>(args)...);
+  }
+  Stack getOutputs() {
+    return Stack();
+  }
+  void release() && {}
+};
+
+TORCH_API void _print_dispatch_trace(const std::string& label, const std::string& op_name, const DispatchKeySet& dispatchKeySet);
+
+} // namespace detail
 
 // See [Note: Argument forwarding in the dispatcher] for why Args doesn't use &&
 template<class Return, class... Args>
-inline Return Dispatcher::callWithDispatchKeySlowPath(const TypedOperatorHandle<Return(Args...)>& op, bool pre_sampled, DispatchKeySet dispatchKeySet, const KernelFunction& kernel, Args... args) {
-    // Check if we need to run callbacks registered with RecordFunction
-    // If true and callbacks need inputs, we box the arguments and pass
-    // them into the callbacks and also into the kernel call
-
-    // Note: for perf reasons we wouldn't want to pass arguments into
-    // the function call or prematurely box them
-  at::RecordFunction guard(at::RecordScope::FUNCTION, pre_sampled);
-  if (C10_UNLIKELY(guard.isActive())) {
-    auto dispatchKey = dispatchKeySet.highestPriorityTypeId();
-    if (op.operatorDef_->op.isObserved()) {
-      if (guard.needsInputs()) {
-        runRecordFunction(guard, op, dispatchKey, impl::boxArgs(args...));
-      } else {
-        runRecordFunction(guard, op, dispatchKey);
+inline Return Dispatcher::callWithDispatchKeySlowPath(const TypedOperatorHandle<Return(Args...)>& op, at::StepCallbacks& stepCallbacks, DispatchKeySet dispatchKeySet, const KernelFunction& kernel, Args... args) {
+  // If callbacks need inputs, we box the arguments and pass them to the guard.
+  // Note: For perf reasons we wouldn't want to prematurely box the arguments.
+  at::RecordFunction guard(std::move(stepCallbacks));
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(op.operatorDef_->op.isObserved());
+  auto dispatchKey = dispatchKeySet.highestPriorityTypeId();
+  auto& schema = op.schema();
+  auto schema_ref = std::reference_wrapper<const FunctionSchema>(schema);
+  constexpr auto num_boxed_args = impl::boxed_size<Args...>();
+  if constexpr (num_boxed_args != 0) {
+    if (guard.needsInputs()) {
+      // If we used std::array<IValue, num_boxed_args> here, we would
+      // have to spend time default constructing the IValues in
+      // boxedArgs. aligned_storage has no such requirement.
+      impl::IValueAlignedStorage boxedArgs[num_boxed_args];
+      // For debugging only; could be removed (but the compiler will do
+      // that for us and it's nice to have the extra assurance of
+      // correctness from our debug builds).
+      int lastArgIdx = 0;
+      impl::boxArgsToStack(boxedArgs, lastArgIdx, args...);
+      TORCH_INTERNAL_ASSERT_DEBUG_ONLY(lastArgIdx == num_boxed_args);
+      // I don't *think* we need std::launder here, because IValue has
+      // no subclasses and no const or reference fields.
+      runRecordFunction(guard, schema_ref, dispatchKey, dispatchKeySet, c10::ArrayRef<const c10::IValue>(reinterpret_cast<IValue *>(boxedArgs), num_boxed_args));
+      for (size_t ii = 0; ii < num_boxed_args; ++ii) {
+        reinterpret_cast<IValue *>(&boxedArgs[ii])->~IValue();
       }
+    } else {
+      runRecordFunction(guard, schema_ref, dispatchKey, dispatchKeySet);
     }
+  } else {
+    runRecordFunction(guard, schema_ref, dispatchKey, dispatchKeySet);
   }
+
+  if (C10_UNLIKELY(guard.needsOutputs())) {
+    // Calls the kernel and capture the output temporarily to pass to
+    // RecordFunction.
+    detail::CaptureKernelCall<Return> captureKernelCall(
+        kernel, op, dispatchKeySet, std::forward<Args>(args)...);
+    guard.setOutputs(captureKernelCall.getOutputs());
+    // Releases the captured output to return to caller.
+    return std::move(captureKernelCall).release();
+  }
+
   // keeping the guard alive while executing the kernel
   return kernel.template call<Return, Args...>(op, dispatchKeySet, std::forward<Args>(args)...);
 }
 
 // See [Note: Argument forwarding in the dispatcher] for why Args doesn't use &&
 template<class Return, class... Args>
-C10_DISPATCHER_INLINE_UNLESS_MOBILE Return Dispatcher::call(const TypedOperatorHandle<Return(Args...)>& op, Args... args) const {
+C10_ALWAYS_INLINE_UNLESS_MOBILE Return Dispatcher::call(const TypedOperatorHandle<Return(Args...)>& op, Args... args) const {
   detail::unused_arg_(args...);  // workaround for a false-positive warning about unused parameters in gcc 5
   auto dispatchKeySet = op.operatorDef_->op.dispatchKeyExtractor()
-    .template getDispatchKeySetUnboxed<Args...>(
-      DispatchKeySet::FULL,
-      args...
-    );
-  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(!c10::isAliasDispatchKey(dispatchKeySet.highestPriorityTypeId()));
-  const KernelFunction& kernel = op.operatorDef_->op.lookup(dispatchKeySet.highestPriorityTypeId());
+    .template getDispatchKeySetUnboxed<Args...>(args...);
+#ifndef NDEBUG
+  DispatchTraceNestingGuard debug_guard;
+  if (show_dispatch_trace()) {
+    detail::_print_dispatch_trace("[call]", toString(op.operator_name()), dispatchKeySet);
+  }
+#endif
+  const KernelFunction& kernel = op.operatorDef_->op.lookup(dispatchKeySet);
 #ifndef PYTORCH_DISABLE_PER_OP_PROFILING
-  // By default, when there're no high-frequency or non-sampled callbacks,
-  // RecordFunction is pre-sampled as a perf optimization;
-  // shouldRunRecordFunction checks whether RecordFunction should be executed,
-  // and sets pre_sampled boolean argument value to whether pre-sampling was used -
-  // this boolean is passed into RecordFunction to adjust the sampling rates of
-  // the callbacks
-  bool pre_sampled = false;
-  if (C10_UNLIKELY(at::shouldRunRecordFunction(&pre_sampled))) {
-    return callWithDispatchKeySlowPath<Return, Args...>(op, pre_sampled, dispatchKeySet, kernel, std::forward<Args>(args)...);
+  auto step_callbacks = at::getStepCallbacksUnlessEmpty(at::RecordScope::FUNCTION);
+  if (C10_UNLIKELY(step_callbacks.has_value() && op.operatorDef_->op.isObserved())) {
+    return callWithDispatchKeySlowPath<Return, Args...>(op, *step_callbacks, dispatchKeySet, kernel, std::forward<Args>(args)...);
   }
 #endif  // PYTORCH_DISABLE_PER_OP_PROFILING
-  return kernel.template call<Return, Args...>(op, dispatchKeySet, std::forward<Args>(args)...);
+
+#ifdef FBCODE_CAFFE2
+  if(profilingOperatorEvents()) {
+    struct FireOpRAII {
+       FireOpRAII(at::RecordFunction::schema_ref_t schema_ref) : schema_ref_(schema_ref) {
+           fireOpStartUSDT(schema_ref);
+        }
+       ~FireOpRAII() { fireOpEndUSDT(schema_ref_); }
+       at::RecordFunction::schema_ref_t schema_ref_;
+    } event(op.schema());
+    return kernel.template call<Return, Args...>(op, dispatchKeySet, std::forward<Args>(args)...);
+  } else {
+    return kernel.template call<Return, Args...>(op, dispatchKeySet, std::forward<Args>(args)...);
+  }
+#else
+    return kernel.template call<Return, Args...>(op, dispatchKeySet, std::forward<Args>(args)...);
+#endif // FBCODE_CAFFE2
 }
 
 // See [Note: Argument forwarding in the dispatcher] for why Args doesn't use &&
@@ -460,7 +704,13 @@ template<class Return, class... Args>
 inline Return Dispatcher::redispatch(const TypedOperatorHandle<Return (Args...)>& op, DispatchKeySet currentDispatchKeySet, Args... args) const {
   detail::unused_arg_(args...);  // workaround for a false-positive warning about unused parameters in gcc 5
   // do not use RecordFunction on redispatch
-  const KernelFunction& kernel = op.operatorDef_->op.lookup(currentDispatchKeySet.highestPriorityTypeId());
+#ifndef NDEBUG
+  DispatchTraceNestingGuard debug_guard;
+  if (show_dispatch_trace()) {
+    detail::_print_dispatch_trace("[redispatch]", toString(op.operator_name()), currentDispatchKeySet);
+  }
+#endif
+  const KernelFunction& kernel = op.operatorDef_->op.lookup(currentDispatchKeySet);
   return kernel.template call<Return, Args...>(op, currentDispatchKeySet, std::forward<Args>(args)...);
 }
 
@@ -468,35 +718,76 @@ inline void Dispatcher::callBoxed(const OperatorHandle& op, Stack* stack) const 
   // note: this doesn't need the mutex because write operations on the list keep iterators intact.
   const auto& entry = op.operatorDef_->op;
   auto dispatchKeySet = entry.dispatchKeyExtractor().getDispatchKeySetBoxed(stack);
-  const auto& kernel = entry.lookup(dispatchKeySet.highestPriorityTypeId());
+#ifndef NDEBUG
+  DispatchTraceNestingGuard debug_guard;
+  if (show_dispatch_trace()) {
+    detail::_print_dispatch_trace("[callBoxed]", toString(op.operator_name()), dispatchKeySet);
+  }
+#endif
+  const auto& kernel = entry.lookup(dispatchKeySet);
 #ifndef PYTORCH_DISABLE_PER_OP_PROFILING
-  bool pre_sampled = false;
-  if (C10_UNLIKELY(at::shouldRunRecordFunction(&pre_sampled))) {
-    // using already existing stack to record function execution in observers
-    at::RecordFunction guard(at::RecordScope::FUNCTION, pre_sampled);
-    if (C10_UNLIKELY(guard.isActive())) {
-      auto dispatchKey = dispatchKeySet.highestPriorityTypeId();
-      if (entry.isObserved()) {
-        if (guard.needsInputs()) {
-          runRecordFunction(guard, op, dispatchKey, *stack);
-        } else {
-          runRecordFunction(guard, op, dispatchKey);
-        }
-      }
-    }
+  auto step_callbacks = at::getStepCallbacksUnlessEmpty(at::RecordScope::FUNCTION);
+  if (C10_UNLIKELY(step_callbacks.has_value() && entry.isObserved())) {
+    at::RecordFunction guard(std::move(*step_callbacks));
+    auto dispatchKey = dispatchKeySet.highestPriorityTypeId();
+    auto& schema = op.schema();
+    auto schema_ref = std::reference_wrapper<const FunctionSchema>(schema);
+    guard.needsInputs() ? runRecordFunction(guard, schema_ref, dispatchKey, dispatchKeySet, c10::ArrayRef<const c10::IValue>(stack->data(), stack->size()))
+                        : runRecordFunction(guard, schema_ref, dispatchKey, dispatchKeySet);
+
     // keeping the guard alive while executing the kernel
     kernel.callBoxed(op, dispatchKeySet, stack);
+
+    if (C10_UNLIKELY(guard.needsOutputs())) {
+      guard.setOutputs(*stack);
+    }
     return;
   }
 #endif  // PYTORCH_DISABLE_PER_OP_PROFILING
   kernel.callBoxed(op, dispatchKeySet, stack);
 }
 
+// NB: this doesn't count as a "true" dispatcher jump, so no instrumentation
+inline void Dispatcher::callBoxedForDispatchKey(const OperatorHandle& op, DispatchKey dk, Stack* stack) const {
+  // note: this doesn't need the mutex because write operations on the list keep iterators intact.
+  const auto& entry = op.operatorDef_->op;
+  // We still compute this as we're obligated to pass it on to the internal
+  // kernel, if it is a boxed fallback
+  auto dispatchKeySet = entry.dispatchKeyExtractor().getDispatchKeySetBoxed(stack);
+  const auto& kernel = ([&]() {
+    if (op.hasKernelForDispatchKey(dk)) {
+      return entry.kernelForDispatchKey(dk);
+    } else {
+      auto idx = getDispatchTableIndexForDispatchKey(dk);
+      TORCH_INTERNAL_ASSERT(idx >= 0);
+      return backendFallbackKernels_[idx].kernel;
+    }
+  })();
+  kernel.callBoxed(op, dispatchKeySet, stack);
+}
+
 inline void Dispatcher::redispatchBoxed(const OperatorHandle& op, DispatchKeySet dispatchKeySet, Stack* stack) const {
   // note: this doesn't need the mutex because write operations on the list keep iterators intact.
   const auto& entry = op.operatorDef_->op;
-  const auto& kernel = entry.lookup(dispatchKeySet.highestPriorityTypeId());
+#ifndef NDEBUG
+  DispatchTraceNestingGuard debug_guard;
+  if (show_dispatch_trace()) {
+    detail::_print_dispatch_trace("[redispatchBoxed]", toString(op.operator_name()), dispatchKeySet);
+  }
+#endif
+  const auto& kernel = entry.lookup(dispatchKeySet);
   return kernel.callBoxed(op, dispatchKeySet, stack);
 }
 
 } // namespace c10
+
+namespace std {
+
+template <>
+struct hash<c10::OperatorHandle> {
+  size_t operator()(const c10::OperatorHandle& op) const noexcept {
+    return std::hash<void*>{}(static_cast<void*>(op.operatorDef_));
+  }
+};
+
+} // namespace std

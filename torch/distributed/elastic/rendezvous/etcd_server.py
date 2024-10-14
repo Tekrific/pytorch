@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# mypy: allow-untyped-defs
 
 # Copyright (c) Facebook, Inc. and its affiliates.
 # All rights reserved.
@@ -14,18 +15,21 @@ import socket
 import subprocess
 import tempfile
 import time
-from typing import Optional
-
-import etcd  # type: ignore[import]
+from typing import Optional, TextIO, Union
 
 
-log = logging.getLogger(__name__)
+try:
+    import etcd  # type: ignore[import]
+except ModuleNotFoundError:
+    pass
+
+
+logger = logging.getLogger(__name__)
 
 
 def find_free_port():
     """
-    Finds a free port and binds a temporary socket to it so that
-    the port can be "reserved" until used.
+    Find a free port and binds a temporary socket to it so that the port can be "reserved" until used.
 
     .. note:: the returned socket must be closed before using the port,
               otherwise a ``address already in use`` error will happen.
@@ -55,25 +59,25 @@ def find_free_port():
             s.listen(0)
             return s
         except OSError as e:
-            s.close()
+            s.close()  # type: ignore[possibly-undefined]
             print(f"Socket creation attempt failed: {e}")
     raise RuntimeError("Failed to create a socket")
 
 
 def stop_etcd(subprocess, data_dir: Optional[str] = None):
     if subprocess and subprocess.poll() is None:
-        log.info("stopping etcd server")
+        logger.info("stopping etcd server")
         subprocess.terminate()
         subprocess.wait()
 
     if data_dir:
-        log.info(f"deleting etcd data dir: {data_dir}")
+        logger.info("deleting etcd data dir: %s", data_dir)
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
 class EtcdServer:
     """
-    .. note:: tested on etcd server v3.4.3
+    .. note:: tested on etcd server v3.4.3.
 
     Starts and stops a local standalone etcd server on a random free
     port. Useful for single node, multi-worker launches or testing,
@@ -130,36 +134,35 @@ class EtcdServer:
             return self._etcd_proc
 
     def get_port(self) -> int:
-        """
-        Returns:
-            the port the server is running on.
-        """
+        """Return the port the server is running on."""
         return self._port
 
     def get_host(self) -> str:
-        """
-        Returns:
-            the host the server is running on.
-        """
+        """Return the host the server is running on."""
         return self._host
 
     def get_endpoint(self) -> str:
-        """
-        Returns:
-            the etcd server endpoint (host:port)
-        """
+        """Return the etcd server endpoint (host:port)."""
         return f"{self._host}:{self._port}"
 
-    def start(self, timeout: int = 60, num_retries: int = 3) -> None:
+    def start(
+        self,
+        timeout: int = 60,
+        num_retries: int = 3,
+        stderr: Union[int, TextIO, None] = None,
+    ) -> None:
         """
-        Starts the server, and waits for it to be ready. When this function
-        returns the sever is ready to take requests.
+        Start the server, and waits for it to be ready. When this function returns the sever is ready to take requests.
 
         Args:
             timeout: time (in seconds) to wait for the server to be ready
                 before giving up.
             num_retries: number of retries to start the server. Each retry
                 will wait for max ``timeout`` before considering it as failed.
+            stderr: the standard error file handle. Valid values are
+                `subprocess.PIPE`, `subprocess.DEVNULL`, an existing file
+                descriptor (a positive integer), an existing file object, and
+                `None`.
 
         Raises:
             TimeoutError: if the server is not ready within the specified timeout
@@ -169,19 +172,21 @@ class EtcdServer:
             try:
                 data_dir = os.path.join(self._base_data_dir, str(curr_retries))
                 os.makedirs(data_dir, exist_ok=True)
-                return self._start(data_dir, timeout)
+                return self._start(data_dir, timeout, stderr)
             except Exception as e:
                 curr_retries += 1
                 stop_etcd(self._etcd_proc)
-                log.warning(
-                    f"Failed to start etcd server, got error: {str(e)}, retrying"
+                logger.warning(
+                    "Failed to start etcd server, got error: %s, retrying", str(e)
                 )
                 if curr_retries >= num_retries:
                     shutil.rmtree(self._base_data_dir, ignore_errors=True)
                     raise
         atexit.register(stop_etcd, self._etcd_proc, self._base_data_dir)
 
-    def _start(self, data_dir: str, timeout: int = 60) -> None:
+    def _start(
+        self, data_dir: str, timeout: int = 60, stderr: Union[int, TextIO, None] = None
+    ) -> None:
         sock = find_free_port()
         sock_peer = find_free_port()
         self._port = sock.getsockname()[1]
@@ -204,19 +209,15 @@ class EtcdServer:
             )
         )
 
-        log.info(f"Starting etcd server: [{etcd_cmd}]")
+        logger.info("Starting etcd server: [%s]", etcd_cmd)
 
         sock.close()
         sock_peer.close()
-        self._etcd_proc = subprocess.Popen(etcd_cmd, close_fds=True)
+        self._etcd_proc = subprocess.Popen(etcd_cmd, close_fds=True, stderr=stderr)
         self._wait_for_ready(timeout)
 
-    def get_client(self) -> etcd.Client:
-        """
-        Returns:
-           An etcd client object that can be used to make requests to
-           this server.
-        """
+    def get_client(self):
+        """Return an etcd client object that can be used to make requests to this server."""
         return etcd.Client(
             host=self._host, port=self._port, version_prefix="/v2", read_timeout=10
         )
@@ -235,15 +236,13 @@ class EtcdServer:
                     f"Etcd server process exited with the code: {exitcode}"
                 )
             try:
-                log.info(f"etcd server ready. version: {client.version}")
+                logger.info("etcd server ready. version: %s", client.version)
                 return
             except Exception:
                 time.sleep(1)
         raise TimeoutError("Timed out waiting for etcd server to be ready!")
 
     def stop(self) -> None:
-        """
-        Stops the server and cleans up auto generated resources (e.g. data dir)
-        """
-        log.info("EtcdServer stop method called")
+        """Stop the server and cleans up auto generated resources (e.g. data dir)."""
+        logger.info("EtcdServer stop method called")
         stop_etcd(self._etcd_proc, self._base_data_dir)

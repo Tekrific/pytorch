@@ -1,3 +1,5 @@
+# mypy: allow-untyped-defs
+
 # If you need to modify this file to make this test pass, please also apply same edits accordingly to
 # https://github.com/pytorch/examples/blob/master/distributed/rpc/rl/main.py
 # and https://pytorch.org/tutorials/intermediate/rpc_tutorial.html
@@ -42,8 +44,8 @@ class Policy(nn.Module):
     Copying the code to make these two examples independent.
     See https://github.com/pytorch/examples/tree/master/reinforcement_learning
     """
-    def __init__(self):
-        super(Policy, self).__init__()
+    def __init__(self) -> None:
+        super().__init__()
         self.affine1 = nn.Linear(4, 128)
         self.dropout = nn.Dropout(p=0.6)
         self.affine2 = nn.Linear(128, 2)
@@ -95,7 +97,7 @@ class Observer:
     select an action. Then, the observer applies the action to its environment
     and reports the reward to the agent.
     """
-    def __init__(self):
+    def __init__(self) -> None:
         self.id = rpc.get_worker_info().id
         self.env = DummyEnv()
         self.env.seed(SEED)
@@ -176,7 +178,7 @@ class Agent:
                 )
             )
 
-        # wait until all obervers have finished this episode
+        # wait until all observers have finished this episode
         for fut in futs:
             fut.wait()
 
@@ -196,7 +198,7 @@ class Agent:
             rewards.extend(self.rewards[ob_id])
 
         # use the minimum observer reward to calculate the running reward
-        min_reward = min([sum(self.rewards[ob_id]) for ob_id in self.rewards])
+        min_reward = min(sum(self.rewards[ob_id]) for ob_id in self.rewards)
         self.running_reward = 0.05 * min_reward + (1 - 0.05) * self.running_reward
 
         # clear saved probs and rewards
@@ -225,7 +227,7 @@ def run_agent(agent, n_steps):
         last_reward = agent.finish_episode()
 
         if agent.running_reward > agent.reward_threshold:
-            print("Solved! Running reward is now {}!".format(agent.running_reward))
+            print(f"Solved! Running reward is now {agent.running_reward}!")
             break
 
 

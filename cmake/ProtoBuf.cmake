@@ -5,11 +5,6 @@ macro(custom_protobuf_find)
   option(protobuf_BUILD_TESTS "" OFF)
   option(protobuf_BUILD_EXAMPLES "" OFF)
   option(protobuf_WITH_ZLIB "" OFF)
-  if(APPLE)
-    # Protobuf generated files triggers a deprecated atomic operation warning
-    # so we turn it off here.
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
-  endif()
   if(${CAFFE2_LINK_LOCAL_PROTOBUF})
     # If we are going to link protobuf locally, we will need to turn off
     # shared libs build for protobuf.
@@ -196,7 +191,7 @@ function(caffe2_protobuf_generate_cpp_py srcs_var hdrs_var python_var)
 
         # If we remove all reference to these pb.h files from external
         # libraries and binaries this rewrite can be removed.
-        COMMAND ${CMAKE_COMMAND} -DFILENAME=${CMAKE_CURRENT_BINARY_DIR}/${fil_we}.pb.h -DNAMESPACES=caffe\;caffe2\;onnx\;torch -DLOCAL_PROTOBUF=${CAFFE2_LINK_LOCAL_PROTOBUF} -P ${PROJECT_SOURCE_DIR}/cmake/ProtoBufPatch.cmake
+        COMMAND ${CMAKE_COMMAND} -DFILENAME=${CMAKE_CURRENT_BINARY_DIR}/${fil_we}.pb.h -DNAMESPACES=caffe\;caffe2\;onnx\;torch -P ${PROJECT_SOURCE_DIR}/cmake/ProtoBufPatch.cmake
 
         DEPENDS ${CAFFE2_PROTOC_EXECUTABLE} ${abs_fil}
         COMMENT "Running C++/Python protocol buffer compiler on ${fil}" VERBATIM )
@@ -209,7 +204,7 @@ function(caffe2_protobuf_generate_cpp_py srcs_var hdrs_var python_var)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}"
         COMMAND ${CAFFE2_PROTOC_EXECUTABLE} -I${PROJECT_SOURCE_DIR} --cpp_out=${DLLEXPORT_STR}${PROJECT_BINARY_DIR} ${abs_fil}
         COMMAND ${CAFFE2_PROTOC_EXECUTABLE} -I${PROJECT_SOURCE_DIR} --python_out "${PROJECT_BINARY_DIR}" ${abs_fil}
-        COMMAND ${CMAKE_COMMAND} -DFILENAME=${CMAKE_CURRENT_BINARY_DIR}/${fil_we}.pb.h -DNAMESPACES=caffe\;caffe2\;onnx\;torch -DLOCAL_PROTOBUF=${CAFFE2_LINK_LOCAL_PROTOBUF} -P ${PROJECT_SOURCE_DIR}/cmake/ProtoBufPatch.cmake
+        COMMAND ${CMAKE_COMMAND} -DFILENAME=${CMAKE_CURRENT_BINARY_DIR}/${fil_we}.pb.h -DNAMESPACES=caffe\;caffe2\;onnx\;torch -DSYSTEM_PROTOBUF=YES -P ${PROJECT_SOURCE_DIR}/cmake/ProtoBufPatch.cmake
         DEPENDS ${CAFFE2_PROTOC_EXECUTABLE} ${abs_fil}
         COMMENT "Running C++/Python protocol buffer compiler on ${fil}" VERBATIM )
     endif()

@@ -1,7 +1,10 @@
 """Type annotations for various benchmark objects."""
+
+# mypy: ignore-errors
+
 from typing import Any, Dict, Optional, Tuple, Union
 
-from core.api import AutoLabels, TimerArgs, GroupedBenchmark
+from core.api import AutoLabels, GroupedBenchmark, TimerArgs
 
 
 # =============================================================================

@@ -8,9 +8,7 @@
 #include <torch/csrc/autograd/functions/basic_ops.h>
 #include <torch/csrc/distributed/autograd/context/context.h>
 
-namespace torch {
-namespace distributed {
-namespace autograd {
+namespace torch::distributed::autograd {
 
 // Forward declaration.
 class BackwardPassCleanupGuard;
@@ -44,7 +42,7 @@ class TORCH_API DistEngine {
   // This method is used to kick off the autograd computation on a node when it
   // receives gradients from the corresponding 'recv' method on another node.
   // The gradients are accumulated in the provided autograd context.
-  std::shared_ptr<c10::ivalue::Future> executeSendFunctionAsync(
+  c10::intrusive_ptr<c10::ivalue::Future> executeSendFunctionAsync(
       const ContextPtr& autogradContext,
       const std::shared_ptr<SendRpcBackward>& sendFunction,
       bool retainGraph);
@@ -56,15 +54,15 @@ class TORCH_API DistEngine {
   // to distributed autograd.
   std::unordered_map<std::string, int> getDebugInfo() const;
 
- private:
-  // Make sure this is a singleton.
-  DistEngine();
-  ~DistEngine();
-
   DistEngine(const DistEngine&) = delete;
   DistEngine& operator=(const DistEngine&) = delete;
   DistEngine(DistEngine&&) = delete;
   DistEngine& operator=(DistEngine&&) = delete;
+
+ private:
+  // Make sure this is a singleton.
+  DistEngine();
+  ~DistEngine();
 
   // Validates the input roots for the backward computations and retrieves the
   // appropriate root edges and corresponding gradients. Populates root_edges
@@ -96,7 +94,7 @@ class TORCH_API DistEngine {
   // traverse the GraphTask instead of using the GraphTask embedded
   // cpu_ready_queue, this is because dist engine might run the same GraphTask
   // from different SendFunctions concurrently in different threads. The method
-  // will only mark the GraphTask as completed when it needes to, which means it
+  // will only mark the GraphTask as completed when it needs to, which means it
   // might not mark as completed for every call as dist engine would like to
   // keep the GraphTask alive when it not receives all gradients.
   //
@@ -125,7 +123,7 @@ class TORCH_API DistEngine {
   // Run the local autograd engine using the provided graphTask and graphRoot
   // and accumulate the gradients part 'outputEdges' in the provided autograd
   // context.
-  std::shared_ptr<c10::ivalue::Future> runEngineAndAccumulateGradients(
+  c10::intrusive_ptr<c10::ivalue::Future> runEngineAndAccumulateGradients(
       const ContextPtr& autogradContext,
       const std::shared_ptr<torch::autograd::Node>& graphRoot,
       const torch::autograd::edge_list& outputEdges,
@@ -160,8 +158,8 @@ class TORCH_API DistEngine {
 // Guard to clean up resources once the backward pass is done.
 class BackwardPassCleanupGuard {
  public:
-  explicit BackwardPassCleanupGuard(const ContextPtr& autogradContext)
-      : autogradContext_(autogradContext) {}
+  explicit BackwardPassCleanupGuard(ContextPtr autogradContext)
+      : autogradContext_(std::move(autogradContext)) {}
 
   ~BackwardPassCleanupGuard() {
     DistEngine::getInstance().cleanupBackwardPass(autogradContext_);
@@ -171,6 +169,4 @@ class BackwardPassCleanupGuard {
   ContextPtr autogradContext_;
 };
 
-} // namespace autograd
-} // namespace distributed
-} // namespace torch
+} // namespace torch::distributed::autograd

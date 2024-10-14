@@ -9,9 +9,7 @@
 
 #include <stdexcept>
 
-namespace torch {
-namespace jit {
-namespace fuser {
+namespace torch::jit::fuser {
 
 namespace {
 c10::AliasAnalysisKind aliasAnalysisIsSpecialCase() {
@@ -26,7 +24,7 @@ RegisterOperators reg_fused_operators({Operator(
     [](const Node* node) -> Operation {
       int64_t dim = node->i(attr::dim);
       int64_t num_inputs = node->inputs().size();
-      return [dim, num_inputs](Stack* stack) {
+      return [dim, num_inputs](Stack& stack) {
         auto result = at::cat(
             fmap(
                 last(stack, num_inputs),
@@ -46,6 +44,4 @@ void runFallback(int64_t key, Stack& stack) {
   InterpreterState{(*maybe_spec)->code()}.run(stack);
 }
 
-} // namespace fuser
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit::fuser

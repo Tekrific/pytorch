@@ -4,17 +4,18 @@
 #include <torch/nn/functional/pixelshuffle.h>
 #include <torch/nn/options/pixelshuffle.h>
 
-#include <torch/csrc/WindowsTorchApiMacro.h>
+#include <torch/csrc/Export.h>
 
 namespace torch {
 namespace nn {
 
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ PixelShuffle ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ PixelShuffle
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 /// Rearranges elements in a tensor of shape :math:`(*, C \times r^2, H, W)`
 /// to a tensor of shape :math:`(*, C, H \times r, W \times r)`, where r is an
 /// upscale factor. See
-/// https://pytorch.org/docs/master/nn.html#torch.nn.PixelShuffle to learn about
+/// https://pytorch.org/docs/main/nn.html#torch.nn.PixelShuffle to learn about
 /// the exact behavior of this module.
 ///
 /// See the documentation for `torch::nn::PixelShuffleOptions` class to learn
@@ -24,7 +25,8 @@ namespace nn {
 /// ```
 /// PixelShuffle model(PixelShuffleOptions(5));
 /// ```
-struct TORCH_API PixelShuffleImpl : public torch::nn::Cloneable<PixelShuffleImpl> {
+struct TORCH_API PixelShuffleImpl
+    : public torch::nn::Cloneable<PixelShuffleImpl> {
   explicit PixelShuffleImpl(const PixelShuffleOptions& options_);
 
   /// Pretty prints the `PixelShuffle` module into the given `stream`.
@@ -40,9 +42,9 @@ struct TORCH_API PixelShuffleImpl : public torch::nn::Cloneable<PixelShuffleImpl
 
 /// A `ModuleHolder` subclass for `PixelShuffleImpl`.
 /// See the documentation for `PixelShuffleImpl` class to learn what methods it
-/// provides, and examples of how to use `PixelShuffle` with `torch::nn::PixelShuffleOptions`.
-/// See the documentation for `ModuleHolder` to learn about PyTorch's
-/// module storage semantics.
+/// provides, and examples of how to use `PixelShuffle` with
+/// `torch::nn::PixelShuffleOptions`. See the documentation for `ModuleHolder`
+/// to learn about PyTorch's module storage semantics.
 TORCH_MODULE(PixelShuffle);
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ PixelUnshuffle ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -50,7 +52,7 @@ TORCH_MODULE(PixelShuffle);
 /// Reverses the PixelShuffle operation by rearranging elements in a tensor of
 /// shape :math:`(*, C, H \times r, W \times r)` to a tensor of shape :math:`(*,
 /// C \times r^2, H, W)`, where r is a downscale factor. See
-/// https://pytorch.org/docs/master/nn.html#torch.nn.PixelUnshuffle to learn
+/// https://pytorch.org/docs/main/nn.html#torch.nn.PixelUnshuffle to learn
 /// about the exact behavior of this module.
 ///
 /// See the documentation for `torch::nn::PixelUnshuffleOptions` class to learn

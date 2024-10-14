@@ -9,8 +9,7 @@
 #include <c10/util/intrusive_ptr.h>
 #include <torch/csrc/jit/frontend/lexer.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 // Trees are used to represent all forms of TC IR, pre- and post-typechecking.
 // Rather than have a full class hierarchy for all TC statements, trees are a
@@ -29,8 +28,6 @@ struct Tree;
 using TreeRef = c10::intrusive_ptr<Tree>;
 using TreeList = at::SmallVector<TreeRef, 4>;
 
-static const TreeList empty_trees = {};
-
 struct Tree : c10::intrusive_ptr_target {
   Tree(int kind_) : kind_(kind_) {}
   int kind() const {
@@ -46,6 +43,7 @@ struct Tree : c10::intrusive_ptr_target {
     throw std::runtime_error("stringValue can only be called on TK_STRING");
   }
   virtual const TreeList& trees() const {
+    static const TreeList empty_trees = {};
     return empty_trees;
   }
   const TreeRef& tree(size_t i) const {
@@ -98,7 +96,7 @@ struct Tree : c10::intrusive_ptr_target {
       throw std::runtime_error(ss.str());
     }
   }
-  virtual ~Tree() = default;
+  ~Tree() override = default;
 
  private:
   int kind_;
@@ -149,11 +147,11 @@ struct Compound : public Tree {
     return false;
   }
   TreeRef map(const std::function<TreeRef(TreeRef)>& fn) override {
-    TreeList trees_;
+    TreeList ret;
     for (auto& t : trees()) {
-      trees_.push_back(fn(t));
+      ret.push_back(fn(t));
     }
-    return Compound::create(kind(), range(), std::move(trees_));
+    return Compound::create(kind(), range(), std::move(ret));
   }
 
   const SourceRange& range() const override {
@@ -210,12 +208,11 @@ struct pretty_tree {
 
 static inline std::ostream& operator<<(std::ostream& out, pretty_tree t_) {
   t_.print(out, t_.tree, 0);
-  return out << std::endl;
+  return out << '\n';
 }
 
 static inline std::ostream& operator<<(std::ostream& out, const TreeRef& t) {
   return out << pretty_tree(t);
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

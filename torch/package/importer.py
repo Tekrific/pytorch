@@ -1,23 +1,26 @@
+# mypy: allow-untyped-defs
 import importlib
 from abc import ABC, abstractmethod
-from pickle import _getattribute, _Pickler  # type: ignore
-from pickle import whichmodule as _pickle_whichmodule  # type: ignore
+from pickle import (  # type: ignore[attr-defined]
+    _getattribute,
+    _Pickler,
+    whichmodule as _pickle_whichmodule,
+)
 from types import ModuleType
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ._mangling import demangle, get_mangle_prefix, is_mangled
+
+
+__all__ = ["ObjNotFoundError", "ObjMismatchError", "Importer", "OrderedImporter"]
 
 
 class ObjNotFoundError(Exception):
     """Raised when an importer cannot find an object by searching for its name."""
 
-    pass
-
 
 class ObjMismatchError(Exception):
     """Raised when an importer found a different object with the same name as the user-provided one."""
-
-    pass
 
 
 class Importer(ABC):
@@ -41,20 +44,21 @@ class Importer(ABC):
         assert obj1 is obj2
     """
 
+    modules: Dict[str, ModuleType]
+
     @abstractmethod
     def import_module(self, module_name: str) -> ModuleType:
         """Import `module_name` from this environment.
 
         The contract is the same as for importlib.import_module.
         """
-        pass
 
     def get_name(self, obj: Any, name: Optional[str] = None) -> Tuple[str, str]:
         """Given an object, return a name that can be used to retrieve the
         object from this environment.
 
         Args:
-            obj: An object to get the the module-environment-relative name for.
+            obj: An object to get the module-environment-relative name for.
             name: If set, use this name instead of looking up __name__ or __qualname__ on `obj`.
                 This is only here to match how Pickler handles __reduce__ functions that return a string,
                 don't use otherwise.
@@ -141,8 +145,23 @@ class Importer(ABC):
         module_name = getattr(obj, "__module__", None)
         if module_name is not None:
             return module_name
-        else:
-            return "__main__"
+
+        # Protect the iteration by using a list copy of self.modules against dynamic
+        # modules that trigger imports of other modules upon calls to getattr.
+        for module_name, module in self.modules.copy().items():
+            if (
+                module_name == "__main__"
+                or module_name == "__mp_main__"  # bpo-42406
+                or module is None
+            ):
+                continue
+            try:
+                if _getattribute(module, name)[0] is obj:
+                    return module_name
+            except AttributeError:
+                pass
+
+        return "__main__"
 
 
 class _SysImporter(Importer):
@@ -167,6 +186,24 @@ class OrderedImporter(Importer):
     def __init__(self, *args):
         self._importers: List[Importer] = list(args)
 
+    def _is_torchpackage_dummy(self, module):
+        """Returns true iff this module is an empty PackageNode in a torch.package.
+
+        If you intern `a.b` but never use `a` in your code, then `a` will be an
+        empty module with no source. This can break cases where we are trying to
+        re-package an object after adding a real dependency on `a`, since
+        OrderedImportere will resolve `a` to the dummy package and stop there.
+
+        See: https://github.com/pytorch/pytorch/pull/71520#issuecomment-1029603769
+        """
+        if not getattr(module, "__torch_package__", False):
+            return False
+        if not hasattr(module, "__path__"):
+            return False
+        if not hasattr(module, "__file__"):
+            return True
+        return module.__file__ is None
+
     def import_module(self, module_name: str) -> ModuleType:
         last_err = None
         for importer in self._importers:
@@ -176,7 +213,10 @@ class OrderedImporter(Importer):
                     "All importers in OrderedImporter must inherit from Importer."
                 )
             try:
-                return importer.import_module(module_name)
+                module = importer.import_module(module_name)
+                if self._is_torchpackage_dummy(module):
+                    continue
+                return module
             except ModuleNotFoundError as err:
                 last_err = err
 
@@ -184,3 +224,11 @@ class OrderedImporter(Importer):
             raise last_err
         else:
             raise ModuleNotFoundError(module_name)
+
+    def whichmodule(self, obj: Any, name: str) -> str:
+        for importer in self._importers:
+            module_name = importer.whichmodule(obj, name)
+            if module_name != "__main__":
+                return module_name
+
+        return "__main__"

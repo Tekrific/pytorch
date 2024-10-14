@@ -1,28 +1,28 @@
-#include <torch/csrc/distributed/autograd/functions/recvrpc_backward.h>
 #include <ATen/core/functional.h>
+#include <c10/util/irange.h>
+#include <torch/csrc/distributed/autograd/functions/recvrpc_backward.h>
 #include <torch/csrc/distributed/autograd/rpc_messages/propagate_gradients_req.h>
 #include <torch/csrc/distributed/rpc/rpc_agent.h>
 
-namespace torch {
-namespace distributed {
-namespace autograd {
+namespace torch::distributed::autograd {
 
 using torch::autograd::Variable;
 using torch::autograd::variable_list;
 
 RecvRpcBackward::RecvRpcBackward(
     const AutogradMetadata& autogradMetadata,
-    ContextPtr autogradContext,
+    const ContextPtr& autogradContext,
     rpc::worker_id_t fromWorkerId,
-    std::unordered_map<c10::DeviceIndex, c10::DeviceIndex> deviceMap)
+    rpc::DeviceMap deviceMap)
     : autogradMetadata_(autogradMetadata),
-      autogradContext_(std::move(autogradContext)),
+      autogradContext_(autogradContext),
       fromWorkerId_(fromWorkerId),
       deviceMap_(std::move(deviceMap)) {}
 
+// NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
 variable_list RecvRpcBackward::apply(variable_list&& grads) {
   std::vector<Variable> outputGrads;
-  for (size_t i = 0; i < grads.size(); i++) {
+  for (const auto i : c10::irange(grads.size())) {
     const auto& grad = grads[i];
     if (grad.defined()) {
       outputGrads.emplace_back(grad);
@@ -63,6 +63,4 @@ variable_list RecvRpcBackward::apply(variable_list&& grads) {
   return variable_list();
 }
 
-} // namespace autograd
-} // namespace distributed
-} // namespace torch
+} // namespace torch::distributed::autograd

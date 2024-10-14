@@ -1,12 +1,19 @@
 #pragma once
 
-#include <ATen/Functions.h>
-#include <ATen/Utils.h>
+#include <ATen/core/Tensor.h>
+#include <ATen/EmptyTensor.h>
+#include <ATen/TensorIterator.h>
+#include <ATen/Dispatch.h>
+#include <ATen/Dispatch_v2.h>
 #include <ATen/native/DispatchStub.h>
-#include <ATen/native/TensorIterator.h>
-#include <c10/core/TensorOptions.h>
 
-namespace at { namespace native {
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#else
+#include <ATen/ops/scalar_tensor.h>
+#endif
+
+namespace at::native {
 // Different combinations of row, col, and offset can lead to two cases:
 //
 // Case 1 - Trapezoid (Triangle as a special case): row + offset <= col
@@ -29,6 +36,10 @@ namespace at { namespace native {
 //    In this case, we first calculate the size of top trapezoid, and then
 //    calculate the size of the bottom rectangle.
 inline int64_t get_tril_size(int64_t row, int64_t col, int64_t offset) {
+  // If either dimension is 0 then the there is no tril
+  if (row == 0 || col == 0) {
+    return 0;
+  }
   // number of elements in the first row of the tril
   auto m_first_row = offset > 0 ?
     std::min<int64_t>(col, 1 + offset) : // upper bounded by col
@@ -52,7 +63,7 @@ inline int64_t get_tril_size(int64_t row, int64_t col, int64_t offset) {
 }
 
 inline void check_args(
-    int64_t row, int64_t col, c10::optional<Layout> layout_opt) {
+    int64_t row, int64_t col, std::optional<Layout> layout_opt) {
   TORCH_CHECK(row >= 0, "row must be non-negative, got", row);
   TORCH_CHECK(col >= 0, "col must be non-negative, got", col);
   if (layout_opt.has_value()) {
@@ -65,8 +76,10 @@ inline void check_args(
 
 using at::check_size_nonnegative;
 
+// assumes maximum value in created tensor is n-1 (e.g., torch.randperm(n))
 inline void check_supported_max_int_with_precision(int64_t n, const Tensor& tensor) {
-  TORCH_CHECK(at::scalar_tensor(n, tensor.options()).defined(),
+  // match defined() to behavior of checks below
+  TORCH_CHECK(at::scalar_tensor(n>0?n-1:n, tensor.options()).defined(),
               "n is too large for result tensor type: '", tensor.toString(), "'");
 
   // Ensure sufficient precision for floating point representation.
@@ -85,12 +98,45 @@ inline void check_supported_max_int_with_precision(int64_t n, const Tensor& tens
   }
 }
 
+// Called by `empty*` functions when deterministic algorithms are enabled to
+// fill the tensor with NaN if it is floating point or complex type, or fill
+// with max value if it is integer type
+inline Tensor& fill_empty_deterministic_(Tensor& tensor) {
+  if (tensor.is_floating_point() || tensor.is_complex()) {
+    AT_DISPATCH_V2(
+      tensor.scalar_type(), "fill_empty_deterministic_", AT_WRAP([&]() {
+        tensor.fill_(std::numeric_limits<scalar_t>::quiet_NaN());
+    }), AT_EXPAND(AT_FLOATING_TYPES), AT_EXPAND(AT_COMPLEX_TYPES), AT_EXPAND(AT_FLOAT8_TYPES), kBFloat16, kHalf, kComplexHalf);
+  } else {
+    AT_DISPATCH_V2(
+      tensor.scalar_type(), "fill_empty_deterministic_", AT_WRAP([&]() {
+        tensor.fill_(std::numeric_limits<scalar_t>::max());
+    }), kBool, AT_EXPAND(AT_INTEGRAL_TYPES_V2));
+  }
+  return tensor;
+}
+
+// The ZeroTensor allocator ignores whatever allocation is requested and always
+// gives you nullptr
+struct ZeroTensorAllocator final : public at::Allocator {
+  ZeroTensorAllocator(at::Device device) : device_(device) {};
+  ~ZeroTensorAllocator() override = default;
+  static void deleter(void* const pointer) {
+    TORCH_INTERNAL_ASSERT(!pointer);
+  }
+  DataPtr allocate(const size_t /*nbytes*/) override {
+    return {nullptr, nullptr, &deleter, device_};
+  }
+  DeleterFnPtr raw_deleter() const override {
+    return deleter;
+  }
+  void copy_data(void* dest [[maybe_unused]], const void* src [[maybe_unused]], std::size_t count [[maybe_unused]]) const final {}
+  at::Device device_;
+};
+
 using binary_fn = void (*)(TensorIterator&);
 
 DECLARE_DISPATCH(binary_fn, complex_stub);
 DECLARE_DISPATCH(binary_fn, polar_stub);
 
-DECLARE_DISPATCH(void(*)(TensorIterator&, const int64_t, const double), kaiser_window_stub);
-
-} // namespace native
-} // namespace at
+} // namespace at::native

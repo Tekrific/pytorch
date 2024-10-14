@@ -1,15 +1,13 @@
 #include <torch/csrc/jit/passes/requires_grad_analysis.h>
 
 #include <ATen/core/jit_type.h>
-#include <torch/csrc/autograd/autograd.h>
+#include <c10/util/irange.h>
 #include <torch/csrc/jit/ir/constants.h>
 #include <torch/csrc/jit/ir/ir.h>
-#include <torch/csrc/jit/runtime/operator.h>
 
 #include <vector>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace {
 
@@ -27,7 +25,7 @@ void setRequiresGrad(
     at::ArrayRef<Value*> outputs,
     const std::vector<bool>& values) {
   AT_ASSERT(outputs.size() == values.size());
-  for (size_t i = 0; i < values.size(); ++i) {
+  for (const auto i : c10::irange(values.size())) {
     setRequiresGrad(outputs[i], values[i]);
   }
 }
@@ -38,7 +36,7 @@ void setRequiresGrad(Node* node, const std::vector<bool>& values) {
 
 std::vector<bool> bitwiseOr(std::vector<bool> a, const std::vector<bool>& b) {
   AT_ASSERT(a.size() == b.size());
-  for (size_t i = 0; i < a.size(); ++i) {
+  for (const auto i : c10::irange(a.size())) {
     a[i] = a[i] || b[i];
   }
   return a;
@@ -60,6 +58,7 @@ void PropagateRequiresGradSimpleNode(Node* node) {
       "aten::ne(Tensor self, Scalar other) -> Tensor",
   };
 
+  // NOLINTNEXTLINE(bugprone-branch-clone)
   if (node->isMemberOf(comparison_ops)) {
     return setRequiresGrad(node->output(), false);
   } else if (node->matches(
@@ -156,5 +155,4 @@ void PropagateRequiresGrad(Block* block) {
 void PropagateRequiresGrad(std::shared_ptr<Graph>& graph) {
   PropagateRequiresGrad(graph->block());
 }
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

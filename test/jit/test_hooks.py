@@ -1,14 +1,40 @@
+# Owner(s): ["oncall: jit"]
+
 import os
 import sys
 import unittest
+from typing import Tuple
 
 import torch
-from jit.test_hooks_modules import *
+from jit.test_hooks_modules import (
+    create_forward_tuple_input,
+    create_module_forward_multiple_inputs,
+    create_module_forward_single_input,
+    create_module_hook_return_nothing,
+    create_module_multiple_hooks_multiple_inputs,
+    create_module_multiple_hooks_single_input,
+    create_module_no_forward_input,
+    create_module_same_hook_repeated,
+    create_submodule_forward_multiple_inputs,
+    create_submodule_forward_single_input,
+    create_submodule_forward_single_input_return_not_tupled,
+    create_submodule_hook_return_nothing,
+    create_submodule_multiple_hooks_multiple_inputs,
+    create_submodule_multiple_hooks_single_input,
+    create_submodule_no_forward_input,
+    create_submodule_same_hook_repeated,
+    create_submodule_to_call_directly_with_hooks,
+    ModuleDirectforwardSubmodCall,
+    ModuleForwardSingleInput,
+    ModuleForwardTupleInput,
+)
+
 
 # Make the helper files in test/ importable
 pytorch_test_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.append(pytorch_test_dir)
 from torch.testing._internal.jit_utils import JitTestCase
+
 
 if __name__ == "__main__":
     raise RuntimeError(
@@ -20,7 +46,6 @@ if __name__ == "__main__":
 
 # Tests for JIT forward hooks and pre-hooks
 class TestHooks(JitTestCase):
-
     def test_module_no_forward_input(self):
         self.checkModule(create_module_no_forward_input(), ())
 
@@ -56,7 +81,8 @@ class TestHooks(JitTestCase):
 
     def test_submodule_multiple_hooks_multiple_inputs(self):
         self.checkModule(
-            create_submodule_multiple_hooks_multiple_inputs(), (["a"], "no_pre_hook"),
+            create_submodule_multiple_hooks_multiple_inputs(),
+            (["a"], "no_pre_hook"),
         )
 
     def test_submodule_forward_single_input(self):
@@ -169,7 +195,7 @@ class TestHooks(JitTestCase):
         self.assertNotEqual(m_scripted("a"), m_scripted.forward("a"))
 
     def test_submodule_direct_forward_invocation(self):
-        m_submod_forward_call = ModuleDirectFowardSubmodCall(
+        m_submod_forward_call = ModuleDirectforwardSubmodCall(
             "outer_mod_name", "inner_mod_name"
         )
         m_submod_call = ModuleForwardSingleInput("outer_mod_name", "inner_mod_name")
@@ -212,7 +238,7 @@ class TestHooks(JitTestCase):
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "This error occured while scripting the forward pre-hook 'pre_hook'",
+            "This error occurred while scripting the forward pre-hook 'pre_hook'",
         ):
             torch.jit.script(m)
 
@@ -225,7 +251,8 @@ class TestHooks(JitTestCase):
         m.register_forward_pre_hook(pre_hook_wrong_input1)
 
         with self.assertRaisesRegex(
-            RuntimeError, "has the wrong inner types for the input tuple argument",
+            RuntimeError,
+            "has the wrong inner types for the input tuple argument",
         ):
             torch.jit.script(m)
 
@@ -261,7 +288,8 @@ class TestHooks(JitTestCase):
         m.register_forward_pre_hook(pre_hook_wrong_output)
 
         with self.assertRaisesRegex(
-            RuntimeError, "returned the wrong type of: 'int'",
+            RuntimeError,
+            "returned the wrong type of: 'int'",
         ):
             torch.jit.script(m)
 
@@ -330,7 +358,7 @@ class TestHooks(JitTestCase):
         with self.assertRaisesRegex(
             RuntimeError,
             "has the wrong inner types for the input tuple"
-            r" argument. Received type: 'Tuple\[None\]'",
+            r" argument. Received type: 'Tuple\[NoneType\]'",
         ):
             torch.jit.script(m)
 

@@ -1,12 +1,16 @@
+#include <torch/csrc/distributed/rpc/rref_impl.h>
+
 #include <ATen/record_function.h>
+#include <c10/core/impl/DeviceGuardImplInterface.h>
 #include <fmt/format.h>
 #include <torch/csrc/distributed/autograd/rpc_messages/rpc_with_autograd.h>
 #include <torch/csrc/distributed/autograd/utils.h>
 #include <torch/csrc/distributed/rpc/profiler/remote_profiler_manager.h>
 #include <torch/csrc/distributed/rpc/rref_context.h>
-#include <torch/csrc/distributed/rpc/rref_impl.h>
 #include <torch/csrc/distributed/rpc/rref_proto.h>
 #include <torch/csrc/distributed/rpc/utils.h>
+
+#include <utility>
 
 namespace {
 // If the type is subtype of named type, return its qualifiedname, otherwise
@@ -25,11 +29,10 @@ std::string getTypeStr(const c10::TypePtr& type) {
       return type->annotation_str();
   }
 }
+
 } // namespace
 
-namespace torch {
-namespace distributed {
-namespace rpc {
+namespace torch::distributed::rpc {
 
 std::atomic<local_id_t> RRefContext::nextLocalId_{0};
 
@@ -115,6 +118,10 @@ void UserRRef::tryDel() {
   }
 }
 
+UserRRef::~UserRRef() {
+  tryDel();
+}
+
 void UserRRef::release_resources() {
   tryDel();
 }
@@ -157,7 +164,7 @@ IValue UserRRef::toHere(const float timeoutSeconds) const {
   // ScriptRRefFetchCall message always carries autograd context id even if
   // the message itself does not contain any tensor, because the response would
   // potentially contain tensors.
-  Message msgToSend;
+  c10::intrusive_ptr<Message> msgToSend;
 
   if (isPyObj()) {
     msgToSend = PythonRRefFetchCall(ownerId_, rrefId()).toMessage();
@@ -230,15 +237,38 @@ RRefForkData UserRRef::fork() const {
 
 //////////////////////////  OwnerRRef  /////////////////////////////////////
 
+OwnerRRef::OwnerRRef(
+    worker_id_t ownerId,
+    const RRefId& rrefId,
+    TypePtr type,
+    std::vector<c10::Device> devices)
+    : OwnerRRef(
+          ownerId,
+          rrefId,
+          std::move(type),
+          /* value */ {},
+          std::move(devices)) {}
+
+OwnerRRef::OwnerRRef(
+    worker_id_t ownerId,
+    const RRefId& rrefId,
+    TypePtr type,
+    std::optional<IValue> value,
+    std::vector<c10::Device> devices)
+    : RRef(ownerId, rrefId, std::move(type)) {
+  future_ = c10::make_intrusive<JitFuture>(type_, std::move(devices));
+
+  if (value.has_value()) {
+    future_->markCompleted(value.value());
+  }
+}
+
 const IValue& OwnerRRef::getValue() const {
   TORCH_CHECK(
       !getTimedOut(),
       "RRef creation via rpc.remote() timed out, and it "
       "is possible that the RRef on the owner node does not exist.");
-  future_->wait();
-  if (future_->hasError()) {
-    (void)future_->value(); // Throws the error.
-  }
+  future_->waitAndThrow();
   return future_->constValue();
 }
 
@@ -246,12 +276,12 @@ bool OwnerRRef::hasValue() const {
   return future_->completed();
 }
 
-std::shared_ptr<JitFuture> OwnerRRef::getFuture() {
+c10::intrusive_ptr<JitFuture> OwnerRRef::getFuture() {
   return future_;
 }
 
 void OwnerRRef::setValue(IValue&& value) {
-  future_->markCompleted(value);
+  future_->markCompleted(std::move(value));
 }
 
 void OwnerRRef::setError(std::exception_ptr eptr) {
@@ -270,6 +300,4 @@ std::ostream& operator<<(std::ostream& os, const RRef& rref) {
   }
 }
 
-} // namespace rpc
-} // namespace distributed
-} // namespace torch
+} // namespace torch::distributed::rpc

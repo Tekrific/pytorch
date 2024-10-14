@@ -1,3 +1,4 @@
+#define TORCH_ASSERT_NO_OPERATORS
 #include <ATen/Dispatch.h>
 #include <ATen/native/DispatchStub.h>
 #include <ATen/native/cuda/Loops.cuh>
@@ -7,6 +8,10 @@
 
 // NOTE: CUDA on Windows requires that the enclosing function
 // of a __device__ lambda not have internal linkage.
+
+// TODO: review jiterating igamma and igammac if/when a persistent (across processes)
+//   cache is implemented, because they take a VERY long time to compile
+// TODO: it's also odd these ops use gpu_kernel_with_scalars
 
 namespace {
 
@@ -121,7 +126,7 @@ __host__ __device__ scalar_t _igam_helper_fac(scalar_t a, scalar_t x) {
 
   using accscalar_t = at::acc_type<scalar_t, /*is_cuda=*/true>;
   accscalar_t ax, fac, res, num, numfac;
-  static const accscalar_t MAXLOG = std::is_same<accscalar_t,double>::value ?
+  static const accscalar_t MAXLOG = std::is_same_v<accscalar_t,double> ?
     7.09782712893383996843E2 : 88.72283905206835;
   static const accscalar_t EXP1 = 2.718281828459045;
   static const accscalar_t lanczos_g = 6.024680040776729583740234375;
@@ -153,7 +158,7 @@ __host__ __device__ scalar_t _igam_helper_series(scalar_t a, scalar_t x) {
   // Compute igam using DLMF 8.11.4. [igam1]
 
   using accscalar_t = at::acc_type<scalar_t, /*is_cuda=*/true>;
-  static const accscalar_t MACHEP = std::is_same<accscalar_t, double>::value ?
+  static const accscalar_t MACHEP = std::is_same_v<accscalar_t, double> ?
     1.11022302462515654042E-16 : 5.9604644775390625E-8;
   static const int MAXITER = 2000;
 
@@ -192,7 +197,7 @@ __host__ __device__ scalar_t _igamc_helper_series(scalar_t a, scalar_t x) {
   accscalar_t sum = 0;
   accscalar_t term, logx;
   static const int MAXITER = 2000;
-  static const accscalar_t MACHEP = std::is_same<accscalar_t, double>::value ?
+  static const accscalar_t MACHEP = std::is_same_v<accscalar_t, double> ?
     1.11022302462515654042E-16 : 5.9604644775390625E-8;
 
   for (n = 1; n < MAXITER; n++) {
@@ -243,7 +248,7 @@ __host__ __device__ scalar_t _igam_helper_asymptotic_series(scalar_t a, scalar_t
 
   int k, n, sgn;
   int maxpow = 0;
-  static const accscalar_t MACHEP = std::is_same<accscalar_t, double>::value ?
+  static const accscalar_t MACHEP = std::is_same_v<accscalar_t, double> ?
     1.11022302462515654042E-16 : 5.9604644775390625E-8;
   accscalar_t lambda = x / a;
   accscalar_t sigma = (x - a) / a;
@@ -310,11 +315,11 @@ __host__ __device__ scalar_t _igamc_helper_continued_fraction(scalar_t a, scalar
   accscalar_t ans, ax, c, yc, r, t, y, z;
   accscalar_t pk, pkm1, pkm2, qk, qkm1, qkm2;
   static const int MAXITER = 2000;
-  static const accscalar_t MACHEP = std::is_same<accscalar_t, double>::value ?
+  static const accscalar_t MACHEP = std::is_same_v<accscalar_t, double> ?
     1.11022302462515654042E-16 : 5.9604644775390625E-8;
-  static const accscalar_t BIG = std::is_same<accscalar_t,double>::value ?
+  static const accscalar_t BIG = std::is_same_v<accscalar_t,double> ?
     4.503599627370496e15 : 16777216.;
-  static const accscalar_t BIGINV = std::is_same<accscalar_t,double>::value ?
+  static const accscalar_t BIGINV = std::is_same_v<accscalar_t,double> ?
     2.22044604925031308085e-16 : 5.9604644775390625E-8;
 
   ax = _igam_helper_fac(a, x);
@@ -445,7 +450,7 @@ __noinline__ __host__ __device__ scalar_t calc_igammac(scalar_t a, scalar_t x) {
 }
 
 // NOTE: this __noinline__ is important -- otherwise, observed compile times significantly
-// increase.  The same kernel seems to get recompiled mulitple times via gpu_kernel_with_scalars,
+// increase.  The same kernel seems to get recompiled multiple times via gpu_kernel_with_scalars,
 // multiple dtypes, etc.
 template <typename scalar_t>
 __noinline__ __host__ __device__ scalar_t calc_igamma(scalar_t a, scalar_t x) {
@@ -509,27 +514,34 @@ __noinline__ __host__ __device__ scalar_t calc_igamma(scalar_t a, scalar_t x) {
   return _igam_helper_series(a, x);
 }
 
+template<typename scalar_t>
+struct CalcIgamma{
+  CalcIgamma(bool calc_igammac): calc_igammac_(calc_igammac){}
+  bool calc_igammac_;
+  __device__ scalar_t operator() (scalar_t a, scalar_t b) const {
+    if (calc_igammac_) {
+      return calc_igammac(a,b);
+    } else {
+      return calc_igamma(a,b);
+    }
+  }
+};
+
 }
 
 // end of regularized lower & upper incomplete gamma
 
-namespace at { namespace native {
+namespace at::native {
 
-void igamma_kernel_cuda(TensorIterator& iter) {
-
+void igamma_kernel_cuda(TensorIteratorBase& iter) {
   AT_DISPATCH_FLOATING_TYPES(iter.common_dtype(), "igamma_cuda", [&]() {
-    gpu_kernel_with_scalars(iter, []GPU_LAMBDA(scalar_t a, scalar_t b) -> scalar_t {
-      return calc_igamma(a, b);
-    });
+    gpu_kernel(iter, CalcIgamma<scalar_t>(false));
   });
 }
 
-void igammac_kernel_cuda(TensorIterator& iter) {
-
+void igammac_kernel_cuda(TensorIteratorBase& iter) {
   AT_DISPATCH_FLOATING_TYPES(iter.common_dtype(), "igammac_cuda", [&]() {
-    gpu_kernel_with_scalars(iter, []GPU_LAMBDA(scalar_t a, scalar_t b) -> scalar_t {
-      return calc_igammac(a, b);
-    });
+    gpu_kernel(iter, CalcIgamma<scalar_t>(true));
   });
 }
 
@@ -539,4 +551,4 @@ REGISTER_DISPATCH(igammac_stub, &igammac_kernel_cuda);
 // DO NOT ADD ANY NEW KERNELS HERE
 // CUDA compilation times grow quickly.  It's perfectly acceptable to have a file per kernel.
 
-}} // namespace at::native
+} // namespace at::native

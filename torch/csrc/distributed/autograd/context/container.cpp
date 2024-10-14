@@ -1,10 +1,9 @@
 #include <torch/csrc/distributed/autograd/context/container.h>
+
 #include <c10/util/Exception.h>
 #include <torch/csrc/distributed/autograd/rpc_messages/cleanup_autograd_context_req.h>
 
-namespace torch {
-namespace distributed {
-namespace autograd {
+namespace torch::distributed::autograd {
 
 constexpr int kAutoIncrementBits = 48;
 constexpr int64_t kAutoIncrementMask = (1LL << kAutoIncrementBits) - 1;
@@ -52,7 +51,7 @@ DistAutogradContainer& DistAutogradContainer::init(int64_t worker_id) {
     return container;
   }
 
-  container.worker_id_ = worker_id;
+  container.worker_id_ = static_cast<int16_t>(worker_id);
   container.next_context_id_ = static_cast<int64_t>(worker_id)
       << kAutoIncrementBits;
   container.next_autograd_message_id_ = static_cast<int64_t>(worker_id)
@@ -245,21 +244,17 @@ void DistAutogradContainer::sendReleaseContextRpc(
           CleanupAutogradContextReq(context_id).toMessage(),
           options);
 
-      std::weak_ptr<rpc::JitFuture> wp = cleanupFuture;
-      cleanupFuture->addCallback(
-          [worker_id, wp]() {
-            auto future = wp.lock();
-            TORCH_INTERNAL_ASSERT(future);
-            if (future->hasError()) {
-              std::string errorMsg = c10::str(
-                  "Could not release Dist Autograd Context on node ",
-                  worker_id,
-                  ": ",
-                  future->tryRetrieveErrorMessage());
-              LOG(ERROR) << errorMsg;
-              return;
-            }
-          });
+      cleanupFuture->addCallback([worker_id](rpc::JitFuture& future) {
+        if (future.hasError()) {
+          std::string errorMsg = c10::str(
+              "Could not release Dist Autograd Context on node ",
+              worker_id,
+              ": ",
+              future.tryRetrieveErrorMessage());
+          LOG(ERROR) << errorMsg;
+          return;
+        }
+      });
     } catch (const std::exception& e) {
       LOG(INFO)
           << "Failed to send RPC to clear Dist Autograd context to worker id: "
@@ -332,6 +327,4 @@ int64_t DistAutogradContainer::currentContextId() {
   return current_context_id_;
 }
 
-} // namespace autograd
-} // namespace distributed
-} // namespace torch
+} // namespace torch::distributed::autograd

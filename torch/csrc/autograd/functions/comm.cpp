@@ -1,34 +1,31 @@
 #include <torch/csrc/autograd/functions/comm.h>
 
+#include <ATen/core/functional.h>
 #include <torch/csrc/autograd/function.h>
 #include <torch/csrc/autograd/functions/utils.h>
 #include <torch/csrc/autograd/variable.h>
 #include <torch/csrc/cuda/comm.h>
-#include <ATen/core/functional.h>
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/util/Optional.h>
 
-#include <cstddef>
 #include <memory>
 #include <vector>
 
-namespace torch {
-namespace autograd {
+namespace torch::autograd {
 Scatter::Scatter(
     std::vector<at::Device> devices,
-    const c10::optional<std::vector<int64_t>>& chunk_sizes,
+    std::optional<std::vector<int64_t>> chunk_sizes,
     int64_t dim,
-    const c10::optional<std::vector<c10::optional<at::cuda::CUDAStream>>>& streams,
+    std::optional<std::vector<std::optional<at::cuda::CUDAStream>>> streams,
     bool unsqueeze_scalars)
     : devices_(std::move(devices)),
-      chunk_sizes_(chunk_sizes),
+      chunk_sizes_(std::move(chunk_sizes)),
       dim_(dim),
-      streams_(streams),
+      streams_(std::move(streams)),
       unsqueeze_scalars_(unsqueeze_scalars) {}
 
-Scatter::~Scatter() {}
+Scatter::~Scatter() = default;
 
 variable_list Scatter::apply(variable_list&& inputs) {
   AT_ASSERT(inputs.size() == 1);
@@ -44,8 +41,8 @@ variable_list Scatter::apply(variable_list&& inputs) {
   auto device_indices = fmap(devices_, [](const at::Device& device) -> int64_t {
     return device.index();
   });
-  auto tensors = torch::cuda::scatter(
-      std::move(input), device_indices, chunk_sizes_, dim_, streams_);
+  auto tensors =
+      torch::cuda::scatter(input, device_indices, chunk_sizes_, dim_, streams_);
 
   std::vector<Variable> variables;
   variables.reserve(tensors.size());
@@ -69,7 +66,7 @@ variable_list Scatter::apply(variable_list&& inputs) {
 Gather::Gather(const at::Device& destination_device, int64_t dim)
     : destination_device_(destination_device), dim_(dim) {}
 
-Gather::~Gather() {}
+Gather::~Gather() = default;
 
 variable_list Gather::apply(variable_list&& inputs) {
   bool all_are_zero_dim = true;
@@ -95,7 +92,9 @@ variable_list Gather::apply(variable_list&& inputs) {
   // compute this before moving variables from `inputs`
   if (compute_requires_grad(inputs)) {
     std::vector<at::Device> source_devices;
+    source_devices.reserve(inputs.size());
     std::vector<int64_t> input_sizes;
+    input_sizes.reserve(inputs.size());
     for (auto& input : inputs) {
       source_devices.push_back(input.device());
       input_sizes.push_back(input.size(dim_));
@@ -104,7 +103,7 @@ variable_list Gather::apply(variable_list&& inputs) {
         std::move(source_devices),
         std::move(input_sizes),
         dim_,
-        /*streams=*/c10::nullopt,
+        /*streams=*/std::nullopt,
         /*unsqueeze_scalars=*/unsqueeze_scalars);
     grad_fn->set_next_edges(collect_next_edges(inputs));
   }
@@ -124,7 +123,7 @@ variable_list Gather::apply(variable_list&& inputs) {
   // so no need for extra logic here
   at::Tensor variable;
   {
-    at::AutoNonVariableTypeMode non_var_type_mode(true);
+    at::AutoDispatchBelowAutograd mode;
     // This is special logic for torch::cuda::gather!
     const auto destination_index =
         destination_device_.is_cpu() ? -1 : destination_device_.index();
@@ -136,5 +135,4 @@ variable_list Gather::apply(variable_list&& inputs) {
   return {variable};
 }
 
-} // namespace autograd
-} // namespace torch
+} // namespace torch::autograd

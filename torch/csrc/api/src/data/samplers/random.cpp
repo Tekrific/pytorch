@@ -14,7 +14,7 @@ RandomSampler::RandomSampler(int64_t size, Dtype index_dtype)
 
 RandomSampler::~RandomSampler() = default;
 
-void RandomSampler::reset(optional<size_t> new_size) {
+void RandomSampler::reset(std::optional<size_t> new_size) {
   // This allocates a new chunk of memory every time (just FYI). It should be
   // amortized over the entire epoch hopefully.
   const auto size = new_size.value_or(static_cast<size_t>(indices_.numel()));
@@ -36,7 +36,7 @@ optional<std::vector<size_t>> RandomSampler::next(size_t batch_size) {
   // will be two allocations: one for the upcast slice, and one for the
   // returned `index_batch` vector.
   slice = slice.to(torch::kInt64);
-  const auto* data = slice.data_ptr<int64_t>();
+  const auto* data = slice.const_data_ptr<int64_t>();
   std::copy(data, data + index_batch.size(), index_batch.begin());
   index_ += index_batch.size();
   return index_batch;

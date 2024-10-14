@@ -3,14 +3,13 @@ import atexit
 import os
 import re
 import shutil
-import tempfile
 import textwrap
 import threading
-import uuid
 from typing import Any, List, Optional
 
 import torch
 from torch.utils.benchmark.utils._stubs import CallgrindModuleType, TimeitModuleType
+from torch.utils.benchmark.utils.common import _make_temp_dir
 from torch.utils import cpp_extension
 
 
@@ -30,10 +29,15 @@ SOURCE_ROOT = os.path.split(os.path.abspath(__file__))[0]
 #   ````
 # `setup` and `stmt` do not change, so we can reuse the executable from the
 # first pass through the loop.
-BUILD_ROOT = os.path.join(
-    tempfile.gettempdir(),
-    f"benchmark_utils_jit_build_{uuid.uuid4()}".replace("-", "")
-)
+_BUILD_ROOT: Optional[str] = None
+
+def _get_build_root() -> str:
+    global _BUILD_ROOT
+    if _BUILD_ROOT is None:
+        _BUILD_ROOT = _make_temp_dir(prefix="benchmark_utils_jit_build")
+        atexit.register(shutil.rmtree, _BUILD_ROOT)
+    return _BUILD_ROOT
+
 
 # BACK_TESTING_NOTE:
 #   There are two workflows where this code could be used. One is the obvious
@@ -65,6 +69,10 @@ if hasattr(torch.__config__, "_cxx_flags"):
         CXX_FLAGS = torch.__config__._cxx_flags().strip().split()
         if CXX_FLAGS is not None and "-g" not in CXX_FLAGS:
             CXX_FLAGS.append("-g")
+        # remove "-W" flags to allow build benchmarks
+        # with a relaxed constraint of compiler versions
+        if CXX_FLAGS is not None:
+            CXX_FLAGS = list(filter(lambda x: not x.startswith("-W"), CXX_FLAGS))
 
     except RuntimeError:
         # We are in FBCode.
@@ -124,16 +132,12 @@ def _compile_template(
     # cache builds which will significantly reduce the cost of repeated
     # invocations.
     with LOCK:
-        if not os.path.exists(BUILD_ROOT):
-            os.makedirs(BUILD_ROOT)
-            atexit.register(shutil.rmtree, BUILD_ROOT)
-
         name = f"timer_cpp_{abs(hash(src))}"
-        build_dir = os.path.join(BUILD_ROOT, name)
+        build_dir = os.path.join(_get_build_root(), name)
         os.makedirs(build_dir, exist_ok=True)
 
         src_path = os.path.join(build_dir, "timer_src.cpp")
-        with open(src_path, "wt") as f:
+        with open(src_path, "w") as f:
             f.write(src)
 
     # `cpp_extension` has its own locking scheme, so we don't need our lock.
@@ -150,7 +154,7 @@ def _compile_template(
 
 def compile_timeit_template(*, stmt: str, setup: str, global_setup: str) -> TimeitModuleType:
     template_path: str = os.path.join(SOURCE_ROOT, "timeit_template.cpp")
-    with open(template_path, "rt") as f:
+    with open(template_path) as f:
         src: str = f.read()
 
     module = _compile_template(stmt=stmt, setup=setup, global_setup=global_setup, src=src, is_standalone=False)
@@ -160,7 +164,7 @@ def compile_timeit_template(*, stmt: str, setup: str, global_setup: str) -> Time
 
 def compile_callgrind_template(*, stmt: str, setup: str, global_setup: str) -> str:
     template_path: str = os.path.join(SOURCE_ROOT, "valgrind_wrapper", "timer_callgrind_template.cpp")
-    with open(template_path, "rt") as f:
+    with open(template_path) as f:
         src: str = f.read()
 
     target = _compile_template(stmt=stmt, setup=setup, global_setup=global_setup, src=src, is_standalone=True)

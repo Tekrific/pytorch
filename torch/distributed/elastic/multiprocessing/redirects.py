@@ -1,3 +1,4 @@
+# mypy: allow-untyped-defs
 # !/usr/bin/env python3
 
 # Copyright (c) Facebook, Inc. and its affiliates.
@@ -8,15 +9,32 @@
 
 # Taken and modified from original source:
 # https://eli.thegreenplace.net/2015/redirecting-all-kinds-of-stdout-in-python/
-
 import ctypes
+import logging
 import os
 import sys
 from contextlib import contextmanager
 from functools import partial
 
 
-libc = ctypes.CDLL("libc.so.6")
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
+
+
+logger = logging.getLogger(__name__)
+
+
+def get_libc():
+    if IS_WINDOWS or IS_MACOS:
+        logger.warning(
+            "NOTE: Redirects are currently not supported in Windows or MacOs."
+        )
+        return None
+    else:
+        return ctypes.CDLL("libc.so.6")
+
+
+libc = get_libc()
 
 
 def _c_std(stream: str):
@@ -33,9 +51,9 @@ _VALID_STD = {"stdout", "stderr"}
 @contextmanager
 def redirect(std: str, to_file: str):
     """
-    Redirects ``std`` (one of ``"stdout"`` or ``"stderr"``) to a file
-    in the path specified by ``to_file``. This method redirects the
-    underlying std file descriptor (not just pyton's ``sys.stdout|stderr``).
+    Redirect ``std`` (one of ``"stdout"`` or ``"stderr"``) to a file in the path specified by ``to_file``.
+
+    This method redirects the underlying std file descriptor (not just python's ``sys.stdout|stderr``).
     See usage for details.
 
     Directory of ``dst_filename`` is assumed to exist and the destination file
@@ -60,7 +78,6 @@ def redirect(std: str, to_file: str):
      print("stdout restored")
 
     """
-
     if std not in _VALID_STD:
         raise ValueError(
             f"unknown standard stream <{std}>, must be one of {_VALID_STD}"
@@ -77,8 +94,10 @@ def redirect(std: str, to_file: str):
 
     with os.fdopen(os.dup(std_fd)) as orig_std, open(to_file, mode="w+b") as dst:
         _redirect(dst)
-        yield
-        _redirect(orig_std)
+        try:
+            yield
+        finally:
+            _redirect(orig_std)
 
 
 redirect_stdout = partial(redirect, "stdout")

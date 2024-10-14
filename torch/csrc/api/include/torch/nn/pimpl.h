@@ -28,6 +28,7 @@ class ModuleHolder : torch::detail::ModuleHolderIndicator {
   /// The module pointer this class wraps.
   /// NOTE: Must be placed at the top of the class so that we can use it with
   /// trailing return types below.
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   std::shared_ptr<Contained> impl_;
 
  public:
@@ -57,9 +58,9 @@ class ModuleHolder : torch::detail::ModuleHolderIndicator {
   template <
       typename Head,
       typename... Tail,
-      typename = typename std::enable_if<
+      typename = std::enable_if_t<
           !(torch::detail::is_module_holder_of<Head, ContainedType>::value &&
-            (sizeof...(Tail) == 0))>::type>
+            (sizeof...(Tail) == 0))>>
   explicit ModuleHolder(Head&& head, Tail&&... tail)
       : impl_(new Contained(
             std::forward<Head>(head),
@@ -139,27 +140,13 @@ class ModuleHolder : torch::detail::ModuleHolderIndicator {
   }
 
  private:
-  /// In C++17, the two methods below could be written as the following:
-  /// if constexpr (std::is_default_constructible_v<Contained>) {
-  ///   return std::make_shared<Contained>();
-  /// } else {
-  ///   return nullptr;
-  /// }
-  /// In C++11, we use SFINAE instead of `if constexpr`.
-
-  template <
-      typename T = Contained,
-      typename = torch::enable_if_t<std::is_default_constructible<T>::value>>
-  std::shared_ptr<Contained> default_construct() {
-    return std::make_shared<Contained>();
-  }
-
   template <typename T = Contained>
-  torch::disable_if_t<
-      std::is_default_constructible<T>::value,
-      std::shared_ptr<Contained>>
-  default_construct() {
-    return nullptr;
+  std::shared_ptr<Contained> default_construct() {
+    if constexpr (std::is_default_constructible_v<T>) {
+      return std::make_shared<Contained>();
+    } else {
+      return nullptr;
+    }
   }
 };
 
@@ -190,6 +177,14 @@ serialize::InputArchive& operator>>(
 } // namespace nn
 } // namespace torch
 
+// Workaround for CUDA 10.2 and below not allowing attribute unused on
+// using declarations.
+#ifdef __CUDACC__
+#define TORCH_UNUSED_EXCEPT_CUDA
+#else
+#define TORCH_UNUSED_EXCEPT_CUDA C10_UNUSED
+#endif
+
 /// Defines a class `Name` which inherits from `nn::ModuleHolder` to provide a
 /// wrapper over a `std::shared_ptr<ImplType>`.
 /// `Impl` is a type alias for `ImplType` which provides a way to call static
@@ -198,7 +193,7 @@ serialize::InputArchive& operator>>(
   class Name : public torch::nn::ModuleHolder<ImplType> { /* NOLINT */ \
    public:                                                             \
     using torch::nn::ModuleHolder<ImplType>::ModuleHolder;             \
-    using Impl = ImplType;                                             \
+    using Impl TORCH_UNUSED_EXCEPT_CUDA = ImplType;                    \
   }
 
 /// Like `TORCH_MODULE_IMPL`, but defaults the `ImplType` name to `<Name>Impl`.

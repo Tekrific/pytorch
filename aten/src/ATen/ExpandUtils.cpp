@@ -1,25 +1,32 @@
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/ExpandUtils.h>
+#include <ATen/ExpandBase.h>
 
 #include <c10/util/irange.h>
 
 namespace at {
+namespace internal {
+TensorBase expand_slow_path(const TensorBase &self, IntArrayRef size) {
+  return OptionalTensorRef(self)->expand(size);
+}
+} // namespace internal
 
 namespace {
 // NOTE: are_expandable did a similar check, please keep them sync if change is needed
-template <typename Container>
-Container infer_size_impl(IntArrayRef a, IntArrayRef b) {
-  size_t dimsA = a.size();
-  size_t dimsB = b.size();
-  size_t ndim = dimsA > dimsB ? dimsA : dimsB;
+template <typename Container, typename ArrayType>
+Container infer_size_impl(ArrayType a, ArrayType b) {
+  // Use ptrdiff_t to ensure signed comparison.
+  auto dimsA = static_cast<ptrdiff_t>(a.size());
+  auto dimsB = static_cast<ptrdiff_t>(b.size());
+  auto ndim = dimsA > dimsB ? dimsA : dimsB;
   Container expandedSizes(ndim);
 
-  // Use ptrdiff_t to ensure signed comparison.
-  for (ptrdiff_t i = (ptrdiff_t)ndim - 1; i >= 0; --i) {
+  for (ptrdiff_t i = ndim - 1; i >= 0; --i) {
     ptrdiff_t offset = ndim - 1 - i;
     ptrdiff_t dimA = dimsA - 1 - offset;
     ptrdiff_t dimB = dimsB - 1 - offset;
-    int64_t sizeA = (dimA >= 0) ? a[dimA] : 1;
-    int64_t sizeB = (dimB >= 0) ? b[dimB] : 1;
+    auto sizeA = (dimA >= 0) ? a[dimA] : 1;
+    auto sizeB = (dimB >= 0) ? b[dimB] : 1;
 
     TORCH_CHECK(
         sizeA == sizeB || sizeA == 1 || sizeB == 1,
@@ -28,7 +35,7 @@ Container infer_size_impl(IntArrayRef a, IntArrayRef b) {
         ") at non-singleton dimension ", i);
 
       // 1s map to the other size (even 0).
-      expandedSizes[i] = sizeA == 1 ? sizeB : sizeA;
+      expandedSizes[i] = sizeA == 1 ? std::move(sizeB) : std::move(sizeA);
   }
 
   return expandedSizes;
@@ -39,24 +46,33 @@ std::vector<int64_t> infer_size(IntArrayRef a, IntArrayRef b) {
   return infer_size_impl<std::vector<int64_t>>(a, b);
 }
 
-DimVector infer_size_dimvector(IntArrayRef a, IntArrayRef b) {
-  return infer_size_impl<DimVector>(a, b);
+std::vector<SymInt> infer_size_symint(SymIntArrayRef a, SymIntArrayRef b) {
+  return infer_size_impl<std::vector<SymInt>>(a, b);
 }
 
-std::tuple<std::vector<int64_t>, std::vector<int64_t>> inferExpandGeometry(
+DimVector infer_size_dimvector(IntArrayRef a, IntArrayRef b) {
+  return infer_size_impl<DimVector, IntArrayRef>(a, b);
+}
+
+SymDimVector infer_size_symdimvector(SymIntArrayRef a, SymIntArrayRef b) {
+  return infer_size_impl<SymDimVector, SymIntArrayRef>(a, b);
+}
+
+template<typename Container>
+C10_ALWAYS_INLINE InferExpandGeometryResult<Container> inferExpandGeometryImpl(
     IntArrayRef tensor_sizes,
     IntArrayRef tensor_strides,
     IntArrayRef sizes) {
-  int64_t ndim = sizes.size();
-  int64_t tensor_dim = tensor_sizes.size();
+  int64_t ndim = static_cast<int64_t>(sizes.size());
+  int64_t tensor_dim = static_cast<int64_t>(tensor_sizes.size());
 
   if (tensor_dim == 0) {
-    std::vector<int64_t> expandedStrides(ndim, 0);
-    return std::tuple<std::vector<int64_t>, std::vector<int64_t>>(
-        sizes.vec(), expandedStrides);
+    return InferExpandGeometryResult<Container>(sizes, ndim);
   }
-  std::vector<int64_t> expandedSizes(ndim);
-  std::vector<int64_t> expandedStrides(ndim);
+
+  InferExpandGeometryResult<Container> result(ndim);
+  auto& expandedSizes = result.sizes;
+  auto& expandedStrides = result.strides;
 
   // create a new geometry for the tensors
   for (int64_t i = ndim - 1; i >= 0; --i) {
@@ -94,8 +110,24 @@ std::tuple<std::vector<int64_t>, std::vector<int64_t>> inferExpandGeometry(
     expandedSizes[i] = size;
     expandedStrides[i] = stride;
   }
-  return std::tuple<std::vector<int64_t>, std::vector<int64_t>>(
-      expandedSizes, expandedStrides);
+  return result;
+}
+
+std::tuple<std::vector<int64_t>, std::vector<int64_t>> inferExpandGeometry(
+    IntArrayRef tensor_sizes,
+    IntArrayRef tensor_strides,
+    IntArrayRef sizes) {
+  auto result = inferExpandGeometryImpl<std::vector<int64_t>>(
+      tensor_sizes, tensor_strides, sizes);
+  return std::make_tuple(std::move(result.sizes), std::move(result.strides));
+}
+
+InferExpandGeometryResult<DimVector> inferExpandGeometry_dimvector(
+    IntArrayRef tensor_sizes,
+    IntArrayRef tensor_strides,
+    IntArrayRef sizes) {
+  return inferExpandGeometryImpl<DimVector>(
+      tensor_sizes, tensor_strides, sizes);
 }
 
 
@@ -180,7 +212,7 @@ std::vector<int64_t> infer_dense_strides(IntArrayRef tensor_sizes, IntArrayRef t
   // compute output strides which preserves the input tensor's memory layout
   std::vector<int64_t> out_strides(ndim);
   int64_t curr_stride = 1;
-  for (size_t i = 0; i < ndim; ++i) {
+  for (const auto i : c10::irange(ndim)) {
     int64_t idx = perm[i];
     out_strides[idx] = curr_stride;
     // Note: for size 0, we simply treated it as 1, it really doesn't matter here

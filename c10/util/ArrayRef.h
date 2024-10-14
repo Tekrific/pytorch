@@ -15,17 +15,21 @@
 
 #pragma once
 
-#include <c10/util/SmallVector.h>
-#include <c10/util/C++17.h>
-#include <c10/util/Exception.h>
+#include <c10/macros/Macros.h>
 #include <c10/util/Deprecated.h>
+#include <c10/util/Exception.h>
+#include <c10/util/SmallVector.h>
 
 #include <array>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
 #include <iterator>
+#include <ostream>
+#include <type_traits>
 #include <vector>
 
 namespace c10 {
-
 /// ArrayRef - Represent a constant reference to an array (0 or more elements
 /// consecutively in memory), i.e. a start pointer and a length.  It allows
 /// various APIs to take consecutive elements easily and conveniently.
@@ -54,6 +58,12 @@ class ArrayRef final {
   /// The number of elements.
   size_type Length;
 
+  void debugCheckNullptrInvariant() {
+    TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+        Data != nullptr || Length == 0,
+        "created ArrayRef with nullptr and non-zero length! std::optional relies on this being illegal");
+  }
+
  public:
   /// @name Constructors
   /// @{
@@ -66,27 +76,46 @@ class ArrayRef final {
   constexpr ArrayRef(const T& OneElt) : Data(&OneElt), Length(1) {}
 
   /// Construct an ArrayRef from a pointer and length.
-  constexpr ArrayRef(const T* data, size_t length)
-      : Data(data), Length(length) {}
+  C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA ArrayRef(const T* data, size_t length)
+      : Data(data), Length(length) {
+    debugCheckNullptrInvariant();
+  }
 
   /// Construct an ArrayRef from a range.
-  constexpr ArrayRef(const T* begin, const T* end)
-      : Data(begin), Length(end - begin) {}
+  C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA ArrayRef(const T* begin, const T* end)
+      : Data(begin), Length(end - begin) {
+    debugCheckNullptrInvariant();
+  }
 
   /// Construct an ArrayRef from a SmallVector. This is templated in order to
   /// avoid instantiating SmallVectorTemplateCommon<T> whenever we
   /// copy-construct an ArrayRef.
   template <typename U>
   /* implicit */ ArrayRef(const SmallVectorTemplateCommon<T, U>& Vec)
-      : Data(Vec.data()), Length(Vec.size()) {}
+      : Data(Vec.data()), Length(Vec.size()) {
+    debugCheckNullptrInvariant();
+  }
+
+  template <
+      typename Container,
+      typename = std::enable_if_t<std::is_same_v<
+          std::remove_const_t<decltype(std::declval<Container>().data())>,
+          T*>>>
+  /* implicit */ ArrayRef(const Container& container)
+      : Data(container.data()), Length(container.size()) {
+    debugCheckNullptrInvariant();
+  }
 
   /// Construct an ArrayRef from a std::vector.
-  // The enable_if stuff here makes sure that this isn't used for std::vector<bool>,
-  // because ArrayRef can't work on a std::vector<bool> bitfield.
+  // The enable_if stuff here makes sure that this isn't used for
+  // std::vector<bool>, because ArrayRef can't work on a std::vector<bool>
+  // bitfield.
   template <typename A>
   /* implicit */ ArrayRef(const std::vector<T, A>& Vec)
       : Data(Vec.data()), Length(Vec.size()) {
-    static_assert(!std::is_same<T, bool>::value, "ArrayRef<bool> cannot be constructed from a std::vector<bool> bitfield.");
+    static_assert(
+        !std::is_same<T, bool>::value,
+        "ArrayRef<bool> cannot be constructed from a std::vector<bool> bitfield.");
   }
 
   /// Construct an ArrayRef from a std::array
@@ -96,11 +125,14 @@ class ArrayRef final {
 
   /// Construct an ArrayRef from a C array.
   template <size_t N>
+  // NOLINTNEXTLINE(*c-arrays*)
   /* implicit */ constexpr ArrayRef(const T (&Arr)[N]) : Data(Arr), Length(N) {}
 
   /// Construct an ArrayRef from a std::initializer_list.
   /* implicit */ constexpr ArrayRef(const std::initializer_list<T>& Vec)
-      : Data(std::begin(Vec) == std::end(Vec) ? static_cast<T*>(nullptr) : std::begin(Vec)),
+      : Data(
+            std::begin(Vec) == std::end(Vec) ? static_cast<T*>(nullptr)
+                                             : std::begin(Vec)),
         Length(Vec.size()) {}
 
   /// @}
@@ -146,7 +178,8 @@ class ArrayRef final {
 
   /// front - Get the first element.
   C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA const T& front() const {
-    TORCH_CHECK(!empty(), "ArrayRef: attempted to access front() of empty list");
+    TORCH_CHECK(
+        !empty(), "ArrayRef: attempted to access front() of empty list");
     return Data[0];
   }
 
@@ -162,7 +195,8 @@ class ArrayRef final {
   }
 
   /// slice(n, m) - Take M elements of the array starting at element N
-  C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA ArrayRef<T> slice(size_t N, size_t M) const {
+  C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA ArrayRef<T> slice(size_t N, size_t M)
+      const {
     TORCH_CHECK(
         N + M <= size(),
         "ArrayRef: invalid slice, N = ",
@@ -175,7 +209,9 @@ class ArrayRef final {
   }
 
   /// slice(n) - Chop off the first N elements of the array.
-  constexpr ArrayRef<T> slice(size_t N) const {
+  C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA ArrayRef<T> slice(size_t N) const {
+    TORCH_CHECK(
+        N <= size(), "ArrayRef: invalid slice, N = ", N, "; size = ", size());
     return slice(N, size() - N);
   }
 
@@ -202,16 +238,17 @@ class ArrayRef final {
   /// The declaration here is extra complicated so that "arrayRef = {}"
   /// continues to select the move assignment operator.
   template <typename U>
-  typename std::enable_if<std::is_same<U, T>::value, ArrayRef<T>>::type&
-  operator=(U&& Temporary) = delete;
+  std::enable_if_t<std::is_same_v<U, T>, ArrayRef<T>>& operator=(
+      // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
+      U&& Temporary) = delete;
 
   /// Disallow accidental assignment from a temporary.
   ///
   /// The declaration here is extra complicated so that "arrayRef = {}"
   /// continues to select the move assignment operator.
   template <typename U>
-  typename std::enable_if<std::is_same<U, T>::value, ArrayRef<T>>::type&
-  operator=(std::initializer_list<U>) = delete;
+  std::enable_if_t<std::is_same_v<U, T>, ArrayRef<T>>& operator=(
+      std::initializer_list<U>) = delete;
 
   /// @}
   /// @name Expensive Operations
@@ -224,16 +261,80 @@ class ArrayRef final {
 };
 
 template <typename T>
-std::ostream& operator<<(std::ostream & out, ArrayRef<T> list) {
+std::ostream& operator<<(std::ostream& out, ArrayRef<T> list) {
   int i = 0;
   out << "[";
-  for(auto e : list) {
+  for (const auto& e : list) {
     if (i++ > 0)
       out << ", ";
     out << e;
   }
   out << "]";
   return out;
+}
+
+/// @name ArrayRef Convenience constructors
+/// @{
+
+/// Construct an ArrayRef from a single element.
+template <typename T>
+ArrayRef<T> makeArrayRef(const T& OneElt) {
+  return OneElt;
+}
+
+/// Construct an ArrayRef from a pointer and length.
+template <typename T>
+ArrayRef<T> makeArrayRef(const T* data, size_t length) {
+  return ArrayRef<T>(data, length);
+}
+
+/// Construct an ArrayRef from a range.
+template <typename T>
+ArrayRef<T> makeArrayRef(const T* begin, const T* end) {
+  return ArrayRef<T>(begin, end);
+}
+
+/// Construct an ArrayRef from a SmallVector.
+template <typename T>
+ArrayRef<T> makeArrayRef(const SmallVectorImpl<T>& Vec) {
+  return Vec;
+}
+
+/// Construct an ArrayRef from a SmallVector.
+template <typename T, unsigned N>
+ArrayRef<T> makeArrayRef(const SmallVector<T, N>& Vec) {
+  return Vec;
+}
+
+/// Construct an ArrayRef from a std::vector.
+template <typename T>
+ArrayRef<T> makeArrayRef(const std::vector<T>& Vec) {
+  return Vec;
+}
+
+/// Construct an ArrayRef from a std::array.
+template <typename T, std::size_t N>
+ArrayRef<T> makeArrayRef(const std::array<T, N>& Arr) {
+  return Arr;
+}
+
+/// Construct an ArrayRef from an ArrayRef (no-op) (const)
+template <typename T>
+ArrayRef<T> makeArrayRef(const ArrayRef<T>& Vec) {
+  return Vec;
+}
+
+/// Construct an ArrayRef from an ArrayRef (no-op)
+template <typename T>
+ArrayRef<T>& makeArrayRef(ArrayRef<T>& Vec) {
+  return Vec;
+}
+
+/// Construct an ArrayRef from a C array.
+template <typename T, size_t N>
+// NOLINTNEXTLINE(*c-arrays*)
+ArrayRef<T> makeArrayRef(const T (&Arr)[N]) {
+  return ArrayRef<T>(Arr);
 }
 
 // WARNING: Template instantiation will NOT be willing to do an implicit

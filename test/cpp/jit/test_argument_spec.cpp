@@ -1,16 +1,20 @@
 #include <gtest/gtest.h>
 
+#include <ATen/ATen.h>
+#include <torch/csrc/jit/api/function_impl.h>
+#include <torch/csrc/jit/runtime/argument_spec.h>
 #include <torch/jit.h>
+
 #include "test/cpp/jit/test_utils.h"
-#include "torch/csrc/jit/runtime/argument_spec.h"
 
 namespace torch {
 namespace jit {
 
 namespace {
 
-int device(const autograd::Variable& v) {
-  return v.device().is_cuda() ? v.get_device() : -1;
+at::Device device(const autograd::Variable& v) {
+  // NOLINTNEXTLINE(cppcoreguidelines-narrowing-conversions,bugprone-narrowing-conversions)
+  return v.device();
 }
 
 bool isEqual(at::IntArrayRef lhs, at::IntArrayRef rhs) {
@@ -107,7 +111,7 @@ TEST(ArgumentSpecTest, CompleteArgumentSpec_CUDA) {
 // }
 
 // TEST(ArgumentSpecTest, VaryingShape) {
-//   c10::VaryingShape<int64_t> vs(c10::optional<size_t>{});
+//   c10::VaryingShape<int64_t> vs(std::optional<size_t>{});
 //   auto ptt_empty1 = TensorType::create({}, {}, vs, vs, false);
 //   auto ptt_empty2 = TensorType::create({}, {}, vs, vs, false);
 //   ASSERT_EQ(hashCode(ptt_empty1), hashCode(ptt_empty2));
@@ -135,11 +139,11 @@ TEST(ArgumentSpecTest, Basic_CUDA) {
   auto& GF = at::CUDA(at::kFloat);
   auto& GD = at::CUDA(at::kDouble);
 
-  auto graph = jit::compile(R"JIT(
+  auto graph = toGraphFunction(jit::compile(R"JIT(
    def fn(a, b, c, d, e):
       return a, b, c, d, e
    )JIT")
-                   ->get_function("fn")
+                                   ->get_function("fn"))
                    .graph();
 
   ArgumentSpecCreator arg_spec_creator(*graph);

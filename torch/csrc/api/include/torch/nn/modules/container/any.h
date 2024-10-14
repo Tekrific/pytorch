@@ -8,7 +8,6 @@
 #include <torch/types.h>
 
 #include <torch/csrc/autograd/variable.h>
-#include <torch/csrc/utils/memory.h>
 #include <torch/csrc/utils/variadic.h>
 
 #include <ATen/Device.h>
@@ -137,7 +136,7 @@ class AnyModule {
 
   /// Creates a deep copy of an `AnyModule` if it contains a module, else an
   /// empty `AnyModule` if it is empty.
-  AnyModule clone(optional<Device> device = nullopt) const;
+  AnyModule clone(std::optional<Device> device = std::nullopt) const;
 
   /// Assigns a module to the `AnyModule` (to circumvent the explicit
   /// constructor).
@@ -151,8 +150,8 @@ class AnyModule {
   AnyValue any_forward(ArgumentTypes&&... arguments);
 
   /// Invokes `forward()` on the contained module with the given arguments, and
-  /// casts the returned `AnyValue` to the supplied `ReturnType` (which defaults to
-  /// `torch::Tensor`).
+  /// casts the returned `AnyValue` to the supplied `ReturnType` (which defaults
+  /// to `torch::Tensor`).
   template <typename ReturnType = torch::Tensor, typename... ArgumentTypes>
   ReturnType forward(ArgumentTypes&&... arguments);
 
@@ -186,9 +185,9 @@ class AnyModule {
   bool is_empty() const noexcept;
 
  private:
-  /// Creates a `unique_ptr<AnyModulePlaceholder>` pointing to a `AnyModuleHolder` of the correct
-  /// type. This method is used to deduce the arguments of the module's
-  /// `forward()` method.
+  /// Creates a `unique_ptr<AnyModulePlaceholder>` pointing to a
+  /// `AnyModuleHolder` of the correct type. This method is used to deduce the
+  /// arguments of the module's `forward()` method.
   template <
       typename ModuleType,
       typename Class,
@@ -254,7 +253,7 @@ inline AnyModule& AnyModule::operator=(const AnyModule& other) {
   return *this;
 }
 
-inline AnyModule AnyModule::clone(optional<Device> device) const {
+inline AnyModule AnyModule::clone(std::optional<Device> device) const {
   AnyModule clone;
   clone.content_ = content_ ? content_->clone_module(device) : nullptr;
   return clone;
@@ -262,6 +261,7 @@ inline AnyModule AnyModule::clone(optional<Device> device) const {
 
 template <typename ModuleType>
 AnyModule& AnyModule::operator=(std::shared_ptr<ModuleType> module) {
+  // NOLINTNEXTLINE(cppcoreguidelines-c-copy-assignment-signature)
   return (*this = AnyModule(std::move(module)));
 }
 
@@ -339,7 +339,8 @@ std::unique_ptr<AnyModulePlaceholder> AnyModule::make_holder(
       !std::is_void<ReturnType>::value,
       "AnyModule cannot store modules that return void "
       "(you can return a dummy value).");
-  return torch::make_unique<AnyModuleHolder<decay_t<ModuleType>, ArgumentTypes...>>(
+  return std::make_unique<
+      AnyModuleHolder<std::decay_t<ModuleType>, ArgumentTypes...>>(
       std::move(module));
 }
 
@@ -356,7 +357,8 @@ template <typename ModuleType, typename ReturnType, typename... ArgumentTypes>
 ModuleType& AnyModule::get_(
     ReturnType (ModuleType::*)(ArgumentTypes...)) const {
   if (typeid(ModuleType).hash_code() == type_info().hash_code()) {
-    return *static_cast<AnyModuleHolder<ModuleType, ArgumentTypes...>&>(*content_)
+    return *static_cast<AnyModuleHolder<ModuleType, ArgumentTypes...>&>(
+                *content_)
                 .module;
   }
   AT_ERROR(

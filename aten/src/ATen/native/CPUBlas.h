@@ -1,19 +1,14 @@
 #pragma once
 
+#include <ATen/OpMathType.h>
 #include <ATen/native/DispatchStub.h>
+#include <ATen/native/TransposeType.h>
 #include <c10/util/complex.h>
 #include <c10/core/ScalarType.h>
 #include <c10/core/Scalar.h>
 
-namespace at {
-namespace native {
-namespace cpublas {
 
-enum TransposeType {
-  Transpose,
-  NoTranspose,
-  // ConjTranspose, -- Not implemented
-};
+namespace at::native::cpublas {
 
 namespace internal {
 void normalize_last_dims(
@@ -38,10 +33,10 @@ template <typename scalar_t>
 void gemm(
     TransposeType transa, TransposeType transb,
     int64_t m, int64_t n, int64_t k,
-    scalar_t alpha,
+    at::opmath_type<scalar_t> alpha,
     const scalar_t *a, int64_t lda,
     const scalar_t *b, int64_t ldb,
-    scalar_t beta,
+    at::opmath_type<scalar_t> beta,
     scalar_t *c, int64_t ldc) {
   internal::normalize_last_dims(transa, transb, m, n, k, &lda, &ldb, &ldc);
   gemm_stub(
@@ -70,6 +65,42 @@ void gemm(
 void gemm(
     TransposeType transa, TransposeType transb,
     int64_t m, int64_t n, int64_t k,
+    float alpha,
+    const at::BFloat16 *a, int64_t lda,
+    const at::BFloat16 *b, int64_t ldb,
+    float beta,
+    at::BFloat16 *c, int64_t ldc);
+
+void gemm(
+    TransposeType transa, TransposeType transb,
+    int64_t m, int64_t n, int64_t k,
+    const float alpha,
+    const at::BFloat16 *a, int64_t lda,
+    const at::BFloat16 *b, int64_t ldb,
+    const float beta,
+    float *c, int64_t ldc);
+
+void gemm(
+    TransposeType transa, TransposeType transb,
+    int64_t m, int64_t n, int64_t k,
+    float alpha,
+    const at::Half *a, int64_t lda,
+    const at::Half *b, int64_t ldb,
+    float beta,
+    at::Half *c, int64_t ldc);
+
+void gemm(
+    TransposeType transa, TransposeType transb,
+    int64_t m, int64_t n, int64_t k,
+    const float alpha,
+    const at::Half *a, int64_t lda,
+    const at::Half *b, int64_t ldb,
+    const float beta,
+    float *c, int64_t ldc);
+
+void gemm(
+    TransposeType transa, TransposeType transb,
+    int64_t m, int64_t n, int64_t k,
     c10::complex<double> alpha,
     const c10::complex<double> *a, int64_t lda,
     const c10::complex<double> *b, int64_t ldb,
@@ -93,6 +124,26 @@ void gemm(
     const int64_t *b, int64_t ldb,
     int64_t beta,
     int64_t *c, int64_t ldc);
+
+template <typename scalar_t>
+void gemm_batched(
+    TransposeType transa, TransposeType transb,
+    int64_t batch_size, int64_t m, int64_t n, int64_t k,
+    scalar_t alpha,
+    const scalar_t * const *a, int64_t lda,
+    const scalar_t * const *b, int64_t ldb,
+    const scalar_t beta,
+    scalar_t * const *c, int64_t ldc);
+
+template <typename scalar_t>
+void gemm_batched_with_stride(
+    TransposeType transa, TransposeType transb,
+    int64_t batch_size, int64_t m, int64_t n, int64_t k,
+    scalar_t alpha,
+    const scalar_t *a, int64_t lda, int64_t batch_stride_a,
+    const scalar_t *b, int64_t ldb, int64_t batch_stride_b,
+    scalar_t beta,
+    scalar_t *c, int64_t ldc, int64_t batch_stride_c);
 
 using axpy_fn = void(*)(at::ScalarType type, int64_t n, const Scalar& a, const void *x, int64_t incx, void *y, int64_t incy);
 
@@ -136,4 +187,40 @@ void copy(int64_t n, const float *x, int64_t incx, float *y, int64_t incy);
 void copy(int64_t n, const c10::complex<double> *x, int64_t incx, c10::complex<double> *y, int64_t incy);
 void copy(int64_t n, const c10::complex<float> *x, int64_t incx, c10::complex<float> *y, int64_t incy);
 
-}}}  // namespace at::native::cpublas
+// Batch-reduce GEMM
+// Operates by the following formula:
+// C = alpha * SUM(A[i] x B[i]) + beta * C, i = 0 to batch size
+// A Base pointer to a tensor A.
+// B Base pointer to a tensor B.
+// C Pointer to a tensor C (accumulation buffer).
+TORCH_API void brgemm(
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t ld_a,
+    int64_t ld_b,
+    int64_t ld_c,
+    const float alpha,
+    const float beta,
+    const at::Half* A,
+    const at::Half* B,
+    float* C);
+
+// Release brgemm hardware context
+void brgemm_release();
+
+// Pack B matrix to get better performance if needed
+void pack(
+    int64_t K,
+    int64_t N,
+    int64_t ld_in,
+    int64_t ld_out,
+    ScalarType dt_in,
+    ScalarType dt_out,
+    const void* in,
+    void* out);
+
+// Whether pack is needed in the platform.
+bool need_pack(ScalarType dt_in);
+
+} // namespace at::native::cpublas

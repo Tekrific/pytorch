@@ -8,10 +8,6 @@
 #include <ATen/cuda/CUDAConfig.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#include <string.h>
-#include <iostream>
-#include <sstream>
-
 using namespace at;
 TEST(TestDlconvertor, TestDlconvertorCUDA) {
   manual_seed(123);
@@ -45,9 +41,9 @@ TEST(TestDlconvertor, TestDlconvertorCUDAHIP) {
   DLManagedTensor* dlMTensor = toDLPack(a);
 
 #if AT_ROCM_ENABLED()
-  ASSERT_TRUE(dlMTensor->dl_tensor.ctx.device_type == DLDeviceType::kDLROCM);
+  ASSERT_TRUE(dlMTensor->dl_tensor.device.device_type == DLDeviceType::kDLROCM);
 #else
-  ASSERT_TRUE(dlMTensor->dl_tensor.ctx.device_type == DLDeviceType::kDLGPU);
+  ASSERT_TRUE(dlMTensor->dl_tensor.device.device_type == DLDeviceType::kDLCUDA);
 #endif
 
   Tensor b = fromDLPack(dlMTensor);

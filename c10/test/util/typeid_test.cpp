@@ -8,10 +8,10 @@ namespace {
 
 class TypeMetaTestFoo {};
 class TypeMetaTestBar {};
-}
+} // namespace
 
-CAFFE_KNOWN_TYPE(TypeMetaTestFoo);
-CAFFE_KNOWN_TYPE(TypeMetaTestBar);
+CAFFE_KNOWN_TYPE_NOEXPORT(TypeMetaTestFoo);
+CAFFE_KNOWN_TYPE_NOEXPORT(TypeMetaTestBar);
 
 namespace {
 
@@ -70,26 +70,25 @@ TEST(TypeMetaTest, TypeMeta) {
   EXPECT_NE(bar_meta.name().find("TypeMetaTestBar"), c10::string_view::npos);
 }
 
-
 class ClassAllowAssignment {
  public:
-  ClassAllowAssignment() : x(42) {}
-  ClassAllowAssignment(const ClassAllowAssignment& src) : x(src.x) {}
+  ClassAllowAssignment() = default;
+  ClassAllowAssignment(const ClassAllowAssignment& src) = default;
   ClassAllowAssignment& operator=(const ClassAllowAssignment& src) = default;
-  int x;
+  int x{42};
 };
 
 class ClassNoAssignment {
  public:
-  ClassNoAssignment() : x(42) {}
+  ClassNoAssignment() = default;
   ClassNoAssignment(const ClassNoAssignment& src) = delete;
   ClassNoAssignment& operator=(const ClassNoAssignment& src) = delete;
-  int x;
+  int x{42};
 };
-}
+} // namespace
 
-CAFFE_KNOWN_TYPE(ClassAllowAssignment);
-CAFFE_KNOWN_TYPE(ClassNoAssignment);
+CAFFE_KNOWN_TYPE_NOEXPORT(ClassAllowAssignment);
+CAFFE_KNOWN_TYPE_NOEXPORT(ClassNoAssignment);
 
 namespace {
 
@@ -126,5 +125,5 @@ TEST(TypeMetaTest, Float16IsNotUint16) {
   EXPECT_NE(TypeMeta::Id<uint16_t>(), TypeMeta::Id<at::Half>());
 }
 
-}  // namespace
-}  // namespace caffe2
+} // namespace
+} // namespace caffe2

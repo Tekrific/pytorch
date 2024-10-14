@@ -26,6 +26,7 @@ ENDIF(LAPACK_FIND_QUIETLY OR NOT LAPACK_FIND_REQUIRED)
 
 # Old search lapack script
 include(CheckFortranFunctionExists)
+include(CheckFunctionExists)
 
 macro(Check_Lapack_Libraries LIBRARIES _prefix _name _flags _list _blas)
   # This macro checks for the existence of the combination of fortran libraries
@@ -95,6 +96,13 @@ if(BLAS_FOUND)
     SET(LAPACK_INFO "mkl")
   ENDIF()
 
+  # NVPL
+  IF((NOT LAPACK_INFO) AND (BLAS_INFO STREQUAL "nvpl"))
+    FIND_PACKAGE(NVPL_LAPACK REQUIRED)
+    SET(LAPACK_LIBRARIES nvpl::lapack_lp64_omp)
+    SET(LAPACK_INFO "nvpl")
+  ENDIF()
+
   # Accelerate
   IF((NOT LAPACK_INFO) AND (BLAS_INFO STREQUAL "accelerate"))
     SET(CMAKE_REQUIRED_LIBRARIES ${BLAS_LIBRARIES})
@@ -119,6 +127,18 @@ if(BLAS_FOUND)
     endif()
   endif()
 
+  # FlexiBLAS
+  IF((NOT LAPACK_INFO) AND (BLAS_INFO STREQUAL "flexi"))
+    SET(CMAKE_REQUIRED_LIBRARIES ${BLAS_LIBRARIES})
+    check_function_exists("cheev_" FLEXIBLAS_LAPACK_WORKS)
+    set(CMAKE_REQUIRED_LIBRARIES)
+    if(FLEXIBLAS_LAPACK_WORKS)
+      SET(LAPACK_INFO "flexi")
+    else()
+      message(STATUS "Strangely, this FlexiBLAS library does not support Lapack?!")
+    endif()
+  endif()
+
   # OpenBlas
   IF((NOT LAPACK_INFO) AND (BLAS_INFO STREQUAL "open"))
     SET(CMAKE_REQUIRED_LIBRARIES ${BLAS_LIBRARIES})
@@ -128,13 +148,7 @@ if(BLAS_FOUND)
       if(NOT LAPACK_CGESDD_WORKS)
         find_library(GFORTRAN_LIBRARY
           NAMES libgfortran.a gfortran
-          PATHS /usr/lib/gcc/aarch64-linux-gnu/9/
-                /usr/lib/gcc/x86_64-redhat-linux/9/
-                /usr/lib/gcc/aarch64-linux-gnu/8/
-                /usr/lib/gcc/x86_64-redhat-linux/8/
-                /usr/lib/gcc/aarch64-linux-gnu/7/
-                /usr/lib/gcc/x86_64-redhat-linux/7/
-                )
+          PATHS ${CMAKE_C_IMPLICIT_LINK_DIRECTORIES})
        list(APPEND CMAKE_REQUIRED_LIBRARIES "${GFORTRAN_LIBRARY}")
        unset(LAPACK_CGESDD_WORKS CACHE)
        check_function_exists("cgesdd_" LAPACK_CGESDD_WORKS)

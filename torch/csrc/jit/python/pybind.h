@@ -2,8 +2,9 @@
 
 #include <torch/csrc/python_headers.h>
 
-#include <ATen/core/interned_strings.h>
 #include <ATen/core/ivalue.h>
+#include <ATen/core/symbol.h>
+#include <c10/util/irange.h>
 #include <torch/csrc/DynamicTypes.h>
 #include <torch/csrc/THP.h>
 #include <torch/csrc/autograd/variable.h>
@@ -17,8 +18,7 @@
 
 namespace py = pybind11;
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 // This is a variant of shared_ptr that "sees through" a wrapper.
 // We use it to convert Value, Node, Block and node to "wrapped" Python
@@ -31,9 +31,9 @@ namespace jit {
 template <typename T>
 class unwrapping_shared_ptr {
   static_assert(
-      std::is_same<T, torch::jit::Value>::value ||
-          std::is_same<T, torch::jit::Node>::value ||
-          std::is_same<T, torch::jit::Block>::value,
+      std::is_same_v<T, torch::jit::Value> ||
+          std::is_same_v<T, torch::jit::Node> ||
+          std::is_same_v<T, torch::jit::Block>,
       "unwrapping type only defined for Graph object types");
 
  private:
@@ -63,13 +63,11 @@ class unwrapping_shared_ptr {
 #endif
 };
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit
 
 PYBIND11_DECLARE_HOLDER_TYPE(T, torch::jit::unwrapping_shared_ptr<T>, true);
 
-namespace pybind11 {
-namespace detail {
+namespace pybind11::detail {
 
 #define CREATE_UNWRAPPING_CASTER(Class)                                                   \
   template <>                                                                             \
@@ -92,7 +90,7 @@ namespace detail {
    protected:                                                                             \
     friend class type_caster_generic;                                                     \
                                                                                           \
-    bool load_value(value_and_holder&& v_h) {                                             \
+    bool load_value(const value_and_holder& v_h) {                                        \
       if (v_h.holder_constructed()) {                                                     \
         value = v_h.template holder<holder_type>().get();                                 \
         return true;                                                                      \
@@ -109,15 +107,10 @@ CREATE_UNWRAPPING_CASTER(torch::jit::Block);
 
 #undef CREATE_UNWRAPPING_CASTER
 
-} // namespace detail
-} // namespace pybind11
-
-namespace pybind11 {
-namespace detail {
-
 template <>
 struct type_caster<torch::jit::IValue> {
  public:
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(torch::jit::IValue, _("IValue"));
 
   bool load(handle src, bool) {
@@ -140,6 +133,7 @@ struct type_caster<torch::jit::IValue> {
 template <>
 struct type_caster<torch::jit::Symbol> {
  public:
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(torch::jit::Symbol, _("Symbol"));
 
   bool load(handle src, bool) {
@@ -167,6 +161,7 @@ struct type_caster<torch::jit::Symbol> {
 template <>
 struct type_caster<torch::jit::AttributeKind> {
  public:
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(torch::jit::AttributeKind, _("AttributeKind"));
 
   bool load(handle src, bool) {
@@ -203,19 +198,16 @@ struct type_caster<std::vector<torch::jit::Node*>> : ListCasterBase {
   }
 };
 
-} // namespace detail
-} // namespace pybind11
+} // namespace pybind11::detail
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 static inline py::tuple tuple_tail(const py::tuple& tup) {
   py::tuple r(tup.size() - 1);
-  for (size_t i = 1; i < tup.size(); i++) {
+  for (const auto i : c10::irange(1, tup.size())) {
     r[i - 1] = tup[i];
   }
   return r;
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

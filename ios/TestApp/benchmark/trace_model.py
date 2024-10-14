@@ -1,8 +1,15 @@
-import torch
-import torchvision
+from torchvision import models
 
-model = torchvision.models.mobilenet_v2(pretrained=True)
+import torch
+from torch.utils.mobile_optimizer import optimize_for_mobile
+
+
+model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
 model.eval()
 example = torch.rand(1, 3, 224, 224)
 traced_script_module = torch.jit.trace(model, example)
-traced_script_module.save("model.pt")
+optimized_scripted_module = optimize_for_mobile(traced_script_module)
+torch.jit.save(optimized_scripted_module, "../models/model.pt")
+exported_optimized_scripted_module = (
+    optimized_scripted_module._save_for_lite_interpreter("../models/model.ptl")
+)

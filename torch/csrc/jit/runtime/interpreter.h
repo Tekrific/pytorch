@@ -1,15 +1,16 @@
 #pragma once
-#include <c10/util/Optional.h>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <ATen/ThreadLocalState.h>
 #include <ATen/core/ivalue.h>
 #include <ATen/core/jit_type.h>
-#include <torch/csrc/WindowsTorchApiMacro.h>
+#include <torch/csrc/Export.h>
 #include <torch/csrc/jit/frontend/source_range.h>
 
 C10_DECLARE_bool(torch_jit_disable_warning_prints);
+C10_DECLARE_bool(torch_jit_enable_rethrow_caught_exception);
 
 namespace at {
 class Tensor;
@@ -20,16 +21,17 @@ struct IValue;
 struct OperatorName;
 } // namespace c10
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 // The interpreter run Graphs with Tensor inputs and Tensor outputs
 // a separate component in the autograd handles unwrapping and wrapping
 // variable objects for use in the interpreter.
+namespace interpreter {
+struct CodeImpl;
+}
 
 struct Node;
 struct GraphExecutor;
-struct CodeImpl;
 struct InterpreterStateImpl;
 struct Graph;
 struct Node;
@@ -39,7 +41,8 @@ using c10::ivalue::Future;
 using TaskLauncher = std::function<void(std::function<void()>)>;
 
 struct TORCH_API Code {
-  Code() : pImpl(nullptr) {}
+  Code() = default;
+  explicit Code(interpreter::CodeImpl* pImpl);
   // remaining_bailout_depth is irrelevant in a `Code` object unless the `Code`
   // is directly created by `GraphExecutor` in which case it's likely to contain
   // `prim::BailOut`s to control the maximum depth of bailout chains
@@ -47,7 +50,6 @@ struct TORCH_API Code {
       const std::shared_ptr<Graph>& graph,
       std::string function_name,
       size_t remaining_bailout_depth = 0);
-  ~Code();
 
   const std::vector<GraphExecutor*>& grad_executors();
   const std::vector<GraphExecutor*>& diff_graph_op_executors();
@@ -61,14 +63,27 @@ struct TORCH_API Code {
   const std::vector<c10::IValue>& constant_table() const;
   const std::vector<c10::TypePtr>& type_table() const;
   const std::vector<Instruction>& instructions() const;
+  const std::unordered_map<std::string, size_t>& op_to_num_specified_args()
+      const;
   const std::vector<Node*>& instructions_source() const;
   void request_bailout(size_t index);
   size_t register_size() const;
+  std::shared_ptr<Graph> graph() const;
 
  private:
-  std::shared_ptr<CodeImpl> pImpl;
+  std::shared_ptr<interpreter::CodeImpl> pImpl;
   friend struct InterpreterStateImpl;
   friend std::ostream& operator<<(std::ostream& out, const Code& code);
+};
+
+struct TORCH_API MobileCode : Code {
+  explicit MobileCode(
+      const std::shared_ptr<Graph>& graph,
+      std::string function_name,
+      bool emit_default_input_instructions = true,
+      bool support_default_args_before_out = true,
+      bool emit_promoted_ops = true,
+      size_t remaining_bailout_depth = 0);
 };
 
 struct InterpreterState {
@@ -78,7 +93,6 @@ struct InterpreterState {
   TORCH_API void run(Stack& stack);
   TORCH_API c10::intrusive_ptr<Future> runAsync(Stack& stack);
   c10::intrusive_ptr<Future> getFuture();
-  TORCH_API ~InterpreterState();
 
  private:
   InterpreterState(c10::intrusive_ptr<c10::intrusive_ptr_target> pImpl);
@@ -95,6 +109,7 @@ struct Suspend : public std::exception {
     return "Suspend";
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   explicit Suspend(c10::intrusive_ptr<Future> future_)
       : future(std::move(future_)) {}
 
@@ -106,16 +121,18 @@ struct Suspend : public std::exception {
 // thread local settings are propagated with ThreadLocalState
 struct InterpreterContinuation {
   InterpreterContinuation(
-      const InterpreterState& state_,
+      InterpreterState state_,
       Stack stack_,
       int64_t dist_autograd_context_id = 0,
-      c10::optional<at::ThreadLocalState> tls_state = c10::nullopt)
-      : state(state_),
+      std::optional<at::ThreadLocalState> tls_state = std::nullopt)
+      : state(std::move(state_)),
         stack(std::move(stack_)),
-        tls_state_(std::move(tls_state)) {
+        tls_state_(std::move(tls_state))
 #ifdef USE_DISTRIBUTED
-    dist_autograd_context_id_ = dist_autograd_context_id;
+        ,
+        dist_autograd_context_id_(dist_autograd_context_id)
 #endif
+  {
   }
 
   void operator()();
@@ -123,7 +140,7 @@ struct InterpreterContinuation {
  private:
   InterpreterState state;
   Stack stack;
-  c10::optional<at::ThreadLocalState> tls_state_ = c10::nullopt;
+  std::optional<at::ThreadLocalState> tls_state_ = std::nullopt;
 #ifdef USE_DISTRIBUTED
   int64_t dist_autograd_context_id_;
 #endif
@@ -137,6 +154,6 @@ TORCH_API at::TensorTypePtr tensorTypeInCurrentExecutionContext(
 
 // current (TLS) TorchScript interpreter callstack
 TORCH_API std::vector<StackEntry> currentCallstack();
+TORCH_API std::vector<std::string> currentModuleHierarchy();
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

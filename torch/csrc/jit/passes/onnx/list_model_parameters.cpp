@@ -4,8 +4,7 @@
 #include <torch/csrc/jit/passes/onnx/helper.h>
 #include <torch/csrc/jit/passes/onnx/list_model_parameters.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace onnx {
 using namespace ::c10::onnx;
@@ -52,7 +51,7 @@ std::deque<std::string> findSubModuleAttr(
 Value* addParamAsArgument(Function* function, std::string& name, IValue& attr) {
   auto schema = function->getSchema();
   auto args = schema.arguments();
-  args.emplace_back(Argument(name, nullptr, c10::nullopt, attr));
+  args.emplace_back(name, nullptr, std::nullopt, attr);
   auto new_schema = FunctionSchema(
       schema.name(),
       schema.overload_name(),
@@ -61,7 +60,8 @@ Value* addParamAsArgument(Function* function, std::string& name, IValue& attr) {
       schema.is_vararg(),
       schema.is_varret());
   function->setSchema(new_schema);
-  return function->graph()->addInput(name)->setType(attr.type());
+  return toGraphFunction(*function).graph()->addInput(name)->setType(
+      attr.type());
 }
 
 std::vector<IValue> getParamAttributes(
@@ -76,6 +76,7 @@ std::vector<IValue> getParamAttributes(
   WithInsertPoint guard(m);
 
   std::vector<IValue> parameterIValues = {};
+  std::unordered_set<Node*> nodesToDestroy;
   for (auto it = block->nodes().begin(); it != block->nodes().end();) {
     Node* n = *it;
     it++; // node n can be destroyed
@@ -142,7 +143,7 @@ std::vector<IValue> getParamAttributes(
           // This attr is constant for ONNX.
           auto attrVal = tryInsertConstant(*graph, attr);
           n->output()->replaceAllUsesWith(*attrVal);
-          n->destroy();
+          nodesToDestroy.emplace(n);
         }
       }
     }
@@ -155,6 +156,9 @@ std::vector<IValue> getParamAttributes(
           std::begin(nextParameterIValues),
           std::end(nextParameterIValues));
     }
+  }
+  for (auto n : nodesToDestroy) {
+    n->destroy();
   }
   return parameterIValues;
 }
@@ -173,7 +177,7 @@ std::pair<Module, std::vector<IValue>> list_module_parameters(
   Module moduleClone = module.clone(true);
   Method method = moduleClone.get_method("forward");
   auto function = &method.function();
-  auto graph = function->graph();
+  auto graph = toGraphFunction(*function).graph();
   // A map of names and values of referenced attributes, to avoid duplicates.
   std::unordered_map<std::string, Value*> attrValues = {};
 
@@ -186,5 +190,4 @@ std::pair<Module, std::vector<IValue>> list_module_parameters(
   return std::make_pair(moduleClone, parameterIValues);
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

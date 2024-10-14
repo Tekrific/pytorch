@@ -1,6 +1,6 @@
 #pragma once
 
-#include <torch/csrc/WindowsTorchApiMacro.h>
+#include <torch/csrc/Export.h>
 #include <torch/data/samplers/base.h>
 
 #include <cstddef>
@@ -55,10 +55,15 @@ class DistributedSampler : public Sampler<BatchRequest> {
     }
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   size_t size_;
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   size_t num_replicas_;
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   size_t rank_;
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   size_t epoch_;
+  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   bool allow_duplicates_;
 };
 
@@ -73,10 +78,10 @@ class TORCH_API DistributedRandomSampler : public DistributedSampler<> {
       bool allow_duplicates = true);
 
   /// Resets the `DistributedRandomSampler` to a new set of indices.
-  void reset(optional<size_t> new_size = nullopt) override;
+  void reset(std::optional<size_t> new_size = std::nullopt) override;
 
   /// Returns the next batch of indices.
-  optional<std::vector<size_t>> next(size_t batch_size) override;
+  std::optional<std::vector<size_t>> next(size_t batch_size) override;
 
   /// Serializes the `DistributedRandomSampler` to the `archive`.
   void save(serialize::OutputArchive& archive) const override;
@@ -106,10 +111,10 @@ class TORCH_API DistributedSequentialSampler : public DistributedSampler<> {
       bool allow_duplicates = true);
 
   /// Resets the `DistributedSequentialSampler` to a new set of indices.
-  void reset(optional<size_t> new_size = nullopt) override;
+  void reset(std::optional<size_t> new_size = std::nullopt) override;
 
   /// Returns the next batch of indices.
-  optional<std::vector<size_t>> next(size_t batch_size) override;
+  std::optional<std::vector<size_t>> next(size_t batch_size) override;
 
   /// Serializes the `DistributedSequentialSampler` to the `archive`.
   void save(serialize::OutputArchive& archive) const override;

@@ -1,8 +1,9 @@
 #include <algorithm>
+#include <optional>
 
-#include <gtest/gtest.h>
 #include <c10/util/ArrayRef.h>
 #include <c10/util/Logging.h>
+#include <gtest/gtest.h>
 
 namespace c10_test {
 
@@ -50,21 +51,23 @@ TEST(LoggingTest, TestEnforceEquals) {
 
 namespace {
 struct EnforceEqWithCaller {
-  void test(const char *x) {
+  void test(const char* x) {
     CAFFE_ENFORCE_EQ_WITH_CALLER(1, 1, "variable: ", x, " is a variable");
   }
 };
-}
+} // namespace
 
 TEST(LoggingTest, TestEnforceMessageVariables) {
-  const char *const x = "hello";
+  const char* const x = "hello";
   CAFFE_ENFORCE_EQ(1, 1, "variable: ", x, " is a variable");
 
   EnforceEqWithCaller e;
   e.test(x);
 }
 
-TEST(LoggingTest, EnforceEqualsObjectWithReferenceToTemporaryWithoutUseOutOfScope) {
+TEST(
+    LoggingTest,
+    EnforceEqualsObjectWithReferenceToTemporaryWithoutUseOutOfScope) {
   std::vector<int> x = {1, 2, 3, 4};
   // This case is a little tricky. We have a temporary
   // std::initializer_list to which our temporary ArrayRef
@@ -96,7 +99,7 @@ std::ostream& operator<<(std::ostream& out, const Noncopyable& nc) {
   out << "Noncopyable(" << nc.x << ")";
   return out;
 }
-}
+} // namespace
 
 TEST(LoggingTest, DoesntCopyComparedObjects) {
   CAFFE_ENFORCE_EQ(Noncopyable(123), Noncopyable(123));
@@ -124,7 +127,8 @@ TEST(LoggingTest, EnforceShowcase) {
   WRAP_AND_PRINT(CAFFE_ENFORCE_EQ(
       one * two + three, three * two, "It's a pretty complicated expression"));
 
-  WRAP_AND_PRINT(CAFFE_ENFORCE_THAT(std::equal_to<void>(), ==, one * two + three, three * two));
+  WRAP_AND_PRINT(CAFFE_ENFORCE_THAT(
+      std::equal_to<void>(), ==, one * two + three, three * two));
 }
 
 TEST(LoggingTest, Join) {
@@ -138,7 +142,7 @@ TEST(LoggingTest, Join) {
 
 TEST(LoggingTest, TestDanglingElse) {
   if (true)
-    DCHECK_EQ(1, 1);
+    TORCH_DCHECK_EQ(1, 1);
   else
     GTEST_FAIL();
 }
@@ -147,9 +151,75 @@ TEST(LoggingTest, TestDanglingElse) {
 TEST(LoggingDeathTest, TestEnforceUsingFatal) {
   bool kTrue = true;
   std::swap(FLAGS_caffe2_use_fatal_for_enforce, kTrue);
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-goto,hicpp-avoid-goto)
   EXPECT_DEATH(CAFFE_ENFORCE(false, "This goes fatal."), "");
   std::swap(FLAGS_caffe2_use_fatal_for_enforce, kTrue);
 }
 #endif
+
+C10_NOINLINE void f1() {
+  CAFFE_THROW("message");
+}
+
+C10_NOINLINE void f2() {
+  f1();
+}
+
+C10_NOINLINE void f3() {
+  f2();
+}
+
+#ifdef FBCODE_CAFFE2
+TEST(LoggingTest, ExceptionWhat) {
+  std::optional<::c10::Error> error;
+  try {
+    f3();
+  } catch (const ::c10::Error& e) {
+    error = e;
+  }
+
+  ASSERT_TRUE(error);
+  std::string what = error->what();
+
+  EXPECT_TRUE(what.find("c10_test::f1()") != std::string::npos) << what;
+  EXPECT_TRUE(what.find("c10_test::f2()") != std::string::npos) << what;
+  EXPECT_TRUE(what.find("c10_test::f3()") != std::string::npos) << what;
+
+  // what() should be recomputed.
+  error->add_context("NewContext");
+  what = error->what();
+  EXPECT_TRUE(what.find("c10_test::f1()") != std::string::npos) << what;
+  EXPECT_TRUE(what.find("c10_test::f2()") != std::string::npos) << what;
+  EXPECT_TRUE(what.find("c10_test::f3()") != std::string::npos) << what;
+  EXPECT_TRUE(what.find("NewContext") != std::string::npos) << what;
+}
+#endif
+
+TEST(LoggingTest, LazyBacktrace) {
+  struct CountingLazyString : ::c10::OptimisticLazyValue<std::string> {
+    mutable size_t invocations{0};
+
+    std::string compute() const override {
+      ++invocations;
+      return "A string";
+    }
+  };
+
+  auto backtrace = std::make_shared<CountingLazyString>();
+  ::c10::Error ex("", backtrace);
+  // The backtrace is not computed on construction, and then it is not computed
+  // more than once.
+  EXPECT_EQ(backtrace->invocations, 0);
+  const char* w1 = ex.what();
+  EXPECT_EQ(backtrace->invocations, 1);
+  const char* w2 = ex.what();
+  EXPECT_EQ(backtrace->invocations, 1);
+  // what() should not be recomputed.
+  EXPECT_EQ(w1, w2);
+
+  ex.add_context("");
+  ex.what();
+  EXPECT_EQ(backtrace->invocations, 1);
+}
 
 } // namespace c10_test

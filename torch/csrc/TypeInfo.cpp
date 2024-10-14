@@ -8,6 +8,8 @@
 #include <torch/csrc/utils/python_strings.h>
 #include <torch/csrc/utils/tensor_dtypes.h>
 
+#include <ATen/Dispatch_v2.h>
+
 #include <c10/util/Exception.h>
 
 #include <structmember.h>
@@ -21,7 +23,7 @@ PyObject* THPFInfo_New(const at::ScalarType& type) {
   if (!self)
     throw python_error();
   auto self_ = reinterpret_cast<THPDTypeInfo*>(self.get());
-  self_->type = c10::toValueType(type);
+  self_->type = c10::toRealValueType(type);
   return self.release();
 }
 
@@ -45,7 +47,7 @@ PyObject* THPFInfo_pynew(PyTypeObject* type, PyObject* args, PyObject* kwargs) {
   torch::ParsedArgs<1> parsed_args;
   auto r = parser.parse(args, kwargs, parsed_args);
   TORCH_CHECK(r.idx < 2, "Not a type");
-  at::ScalarType scalar_type;
+  at::ScalarType scalar_type = at::ScalarType::Undefined;
   if (r.idx == 1) {
     scalar_type = torch::tensors::get_default_scalar_type();
     // The default tensor type can only be set to a floating point type/
@@ -75,10 +77,10 @@ PyObject* THPIInfo_pynew(PyTypeObject* type, PyObject* args, PyObject* kwargs) {
   at::ScalarType scalar_type = r.scalartype(0);
   if (scalar_type == at::ScalarType::Bool) {
     return PyErr_Format(
-        PyExc_TypeError,
-        "torch.bool is not supported by torch.iinfo");
+        PyExc_TypeError, "torch.bool is not supported by torch.iinfo");
   }
-  if (!at::isIntegralType(scalar_type, /*includeBool=*/false) && !at::isQIntType(scalar_type)) {
+  if (!at::isIntegralType(scalar_type, /*includeBool=*/false) &&
+      !at::isQIntType(scalar_type)) {
     return PyErr_Format(
         PyExc_TypeError,
         "torch.iinfo() requires an integer input type. Use torch.finfo to handle '%s'",
@@ -107,128 +109,185 @@ PyObject* THPDTypeInfo_compare(THPDTypeInfo* a, THPDTypeInfo* b, int op) {
 }
 
 static PyObject* THPDTypeInfo_bits(THPDTypeInfo* self, void*) {
-  int bits = elementSize(self->type) * 8;
-  return THPUtils_packInt64(bits);
+  uint64_t bits = elementSize(self->type) * CHAR_BIT;
+  return THPUtils_packUInt64(bits);
 }
 
+#define _AT_DISPATCH_FINFO_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND6(    \
+      at::kHalf,                                  \
+      at::ScalarType::BFloat16,                   \
+      at::ScalarType::Float8_e5m2,                \
+      at::ScalarType::Float8_e5m2fnuz,            \
+      at::ScalarType::Float8_e4m3fn,              \
+      at::ScalarType::Float8_e4m3fnuz,            \
+      TYPE,                                       \
+      NAME,                                       \
+      __VA_ARGS__)
+
 static PyObject* THPFInfo_eps(THPFInfo* self, void*) {
-  return AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(at::kHalf, at::ScalarType::BFloat16,
-      self->type, "epsilon", [] {
-        return PyFloat_FromDouble(
-            std::numeric_limits<
-                at::scalar_value_type<scalar_t>::type>::epsilon());
-      });
+  HANDLE_TH_ERRORS
+  return _AT_DISPATCH_FINFO_TYPES(self->type, "epsilon", [] {
+    return PyFloat_FromDouble(
+        std::numeric_limits<at::scalar_value_type<scalar_t>::type>::epsilon());
+  });
+  END_HANDLE_TH_ERRORS
 }
 
 static PyObject* THPFInfo_max(THPFInfo* self, void*) {
-  return AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(at::kHalf, at::ScalarType::BFloat16, self->type, "max", [] {
+  HANDLE_TH_ERRORS
+  return _AT_DISPATCH_FINFO_TYPES(self->type, "max", [] {
     return PyFloat_FromDouble(
         std::numeric_limits<at::scalar_value_type<scalar_t>::type>::max());
   });
+  END_HANDLE_TH_ERRORS
 }
 
 static PyObject* THPFInfo_min(THPFInfo* self, void*) {
-  return AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(at::kHalf, at::ScalarType::BFloat16, self->type, "lowest", [] {
+  HANDLE_TH_ERRORS
+  return _AT_DISPATCH_FINFO_TYPES(self->type, "lowest", [] {
     return PyFloat_FromDouble(
         std::numeric_limits<at::scalar_value_type<scalar_t>::type>::lowest());
   });
+  END_HANDLE_TH_ERRORS
 }
 
+#define AT_DISPATCH_IINFO_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_V2(                                \
+      TYPE, NAME, AT_WRAP(__VA_ARGS__), AT_EXPAND(AT_INTEGRAL_TYPES_V2))
+
 static PyObject* THPIInfo_max(THPIInfo* self, void*) {
+  HANDLE_TH_ERRORS
   if (at::isIntegralType(self->type, /*includeBool=*/false)) {
-    return AT_DISPATCH_INTEGRAL_TYPES(self->type, "max", [] {
-      return THPUtils_packInt64(std::numeric_limits<scalar_t>::max());
+    return AT_DISPATCH_IINFO_TYPES(self->type, "max", [] {
+      if (std::is_unsigned_v<scalar_t>) {
+        return THPUtils_packUInt64(std::numeric_limits<scalar_t>::max());
+      } else {
+        return THPUtils_packInt64(std::numeric_limits<scalar_t>::max());
+      }
     });
   }
   // Quantized Type
-  return AT_DISPATCH_QINT_TYPES(self->type, "max", [] {
-      return THPUtils_packInt64(std::numeric_limits<underlying_t>::max());
+  return AT_DISPATCH_QINT_AND_SUB_BYTE_TYPES(self->type, "max", [] {
+    return THPUtils_packInt64(std::numeric_limits<underlying_t>::max());
   });
+  END_HANDLE_TH_ERRORS
 }
 
 static PyObject* THPIInfo_min(THPIInfo* self, void*) {
+  HANDLE_TH_ERRORS
   if (at::isIntegralType(self->type, /*includeBool=*/false)) {
-    return AT_DISPATCH_INTEGRAL_TYPES(self->type, "min", [] {
-      return THPUtils_packInt64(std::numeric_limits<scalar_t>::lowest());
+    return AT_DISPATCH_IINFO_TYPES(self->type, "min", [] {
+      if (std::is_unsigned_v<scalar_t>) {
+        return THPUtils_packUInt64(std::numeric_limits<scalar_t>::lowest());
+      } else {
+        return THPUtils_packInt64(std::numeric_limits<scalar_t>::lowest());
+      }
     });
   }
   // Quantized Type
-  return AT_DISPATCH_QINT_TYPES(self->type, "min", [] {
-      return THPUtils_packInt64(std::numeric_limits<underlying_t>::lowest());
+  return AT_DISPATCH_QINT_AND_SUB_BYTE_TYPES(self->type, "min", [] {
+    return THPUtils_packInt64(std::numeric_limits<underlying_t>::lowest());
   });
+  END_HANDLE_TH_ERRORS
 }
 
 static PyObject* THPIInfo_dtype(THPIInfo* self, void*) {
-  std::string primary_name, legacy_name;
-  std::tie(primary_name, legacy_name) = torch::utils::getDtypeNames(self->type);
-  return AT_DISPATCH_INTEGRAL_TYPES(self->type, "dtype", [primary_name] {
-    return PyUnicode_FromString((char*)primary_name.data());
+  HANDLE_TH_ERRORS
+  auto primary_name = c10::getDtypeNames(self->type).first;
+  return AT_DISPATCH_IINFO_TYPES(self->type, "dtype", [&primary_name] {
+    return PyUnicode_FromString(primary_name.data());
   });
+  END_HANDLE_TH_ERRORS
 }
 
-static PyObject* THPFInfo_tiny(THPFInfo* self, void*) {
-  return AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(at::kHalf, at::ScalarType::BFloat16, self->type, "min", [] {
+static PyObject* THPFInfo_smallest_normal(THPFInfo* self, void*) {
+  HANDLE_TH_ERRORS
+  return _AT_DISPATCH_FINFO_TYPES(self->type, "min", [] {
     return PyFloat_FromDouble(
         std::numeric_limits<at::scalar_value_type<scalar_t>::type>::min());
   });
+  END_HANDLE_TH_ERRORS
+}
+
+static PyObject* THPFInfo_tiny(THPFInfo* self, void*) {
+  // see gh-70909, essentially the array_api prefers smallest_normal over tiny
+  return THPFInfo_smallest_normal(self, nullptr);
 }
 
 static PyObject* THPFInfo_resolution(THPFInfo* self, void*) {
-  return AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(at::kHalf, at::ScalarType::BFloat16, self->type, "digits10", [] {
-    return PyFloat_FromDouble(
-        std::pow(10, -std::numeric_limits<at::scalar_value_type<scalar_t>::type>::digits10));
+  HANDLE_TH_ERRORS
+  return _AT_DISPATCH_FINFO_TYPES(self->type, "digits10", [] {
+    return PyFloat_FromDouble(std::pow(
+        10,
+        -std::numeric_limits<at::scalar_value_type<scalar_t>::type>::digits10));
   });
+  END_HANDLE_TH_ERRORS
 }
 
 static PyObject* THPFInfo_dtype(THPFInfo* self, void*) {
-  std::string primary_name, legacy_name;
-  std::tie(primary_name, legacy_name) = torch::utils::getDtypeNames(self->type);
-  return AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(at::kHalf, at::ScalarType::BFloat16, self->type, "dtype", [primary_name] {
-    return PyUnicode_FromString((char*)primary_name.data());
+  HANDLE_TH_ERRORS
+  auto primary_name = c10::getDtypeNames(self->type).first;
+  return _AT_DISPATCH_FINFO_TYPES(self->type, "dtype", [&primary_name] {
+    return PyUnicode_FromString(primary_name.data());
   });
+  END_HANDLE_TH_ERRORS
 }
 
 PyObject* THPFInfo_str(THPFInfo* self) {
   std::ostringstream oss;
-  oss << "finfo(resolution=" << PyFloat_AsDouble(THPFInfo_resolution(self, nullptr));
+  const auto dtypeStr = THPFInfo_dtype(self, nullptr);
+  oss << "finfo(resolution="
+      << PyFloat_AsDouble(THPFInfo_resolution(self, nullptr));
   oss << ", min=" << PyFloat_AsDouble(THPFInfo_min(self, nullptr));
   oss << ", max=" << PyFloat_AsDouble(THPFInfo_max(self, nullptr));
   oss << ", eps=" << PyFloat_AsDouble(THPFInfo_eps(self, nullptr));
+  oss << ", smallest_normal="
+      << PyFloat_AsDouble(THPFInfo_smallest_normal(self, nullptr));
   oss << ", tiny=" << PyFloat_AsDouble(THPFInfo_tiny(self, nullptr));
-  oss << ", dtype=" << PyUnicode_AsUTF8(THPFInfo_dtype(self, nullptr)) << ")";
-
-  return THPUtils_packString(oss.str().c_str());
+  if (dtypeStr != nullptr) {
+    oss << ", dtype=" << PyUnicode_AsUTF8(dtypeStr) << ")";
+  }
+  return !PyErr_Occurred() ? THPUtils_packString(oss.str().c_str()) : nullptr;
 }
 
 PyObject* THPIInfo_str(THPIInfo* self) {
-  auto type = self->type;
-  std::string primary_name, legacy_name;
-  std::tie(primary_name, legacy_name) = torch::utils::getDtypeNames(type);
   std::ostringstream oss;
 
-  oss << "iinfo(min=" << PyFloat_AsDouble(THPIInfo_min(self, nullptr));
-  oss << ", max=" << PyFloat_AsDouble(THPIInfo_max(self, nullptr));
-  oss << ", dtype=" << PyUnicode_AsUTF8(THPIInfo_dtype(self, nullptr)) << ")";
+  const auto dtypeStr = THPIInfo_dtype(self, nullptr);
+  oss << "iinfo(min=" << PyLong_AsDouble(THPIInfo_min(self, nullptr));
+  oss << ", max=" << PyLong_AsDouble(THPIInfo_max(self, nullptr));
+  if (dtypeStr) {
+    oss << ", dtype=" << PyUnicode_AsUTF8(dtypeStr) << ")";
+  }
 
-  return THPUtils_packString(oss.str().c_str());
+  return !PyErr_Occurred() ? THPUtils_packString(oss.str().c_str()) : nullptr;
 }
 
+// NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables,cppcoreguidelines-avoid-c-arrays)
 static struct PyGetSetDef THPFInfo_properties[] = {
     {"bits", (getter)THPDTypeInfo_bits, nullptr, nullptr, nullptr},
     {"eps", (getter)THPFInfo_eps, nullptr, nullptr, nullptr},
     {"max", (getter)THPFInfo_max, nullptr, nullptr, nullptr},
     {"min", (getter)THPFInfo_min, nullptr, nullptr, nullptr},
+    {"smallest_normal",
+     (getter)THPFInfo_smallest_normal,
+     nullptr,
+     nullptr,
+     nullptr},
     {"tiny", (getter)THPFInfo_tiny, nullptr, nullptr, nullptr},
     {"resolution", (getter)THPFInfo_resolution, nullptr, nullptr, nullptr},
     {"dtype", (getter)THPFInfo_dtype, nullptr, nullptr, nullptr},
     {nullptr}};
 
+// NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables,cppcoreguidelines-avoid-c-arrays)
 static PyMethodDef THPFInfo_methods[] = {
     {nullptr} /* Sentinel */
 };
 
 PyTypeObject THPFInfoType = {
-    PyVarObject_HEAD_INIT(nullptr, 0) "torch.finfo", /* tp_name */
+    PyVarObject_HEAD_INIT(nullptr, 0)
+    "torch.finfo", /* tp_name */
     sizeof(THPFInfo), /* tp_basicsize */
     0, /* tp_itemsize */
     nullptr, /* tp_dealloc */
@@ -267,6 +326,7 @@ PyTypeObject THPFInfoType = {
     THPFInfo_pynew, /* tp_new */
 };
 
+// NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables,cppcoreguidelines-avoid-c-arrays)
 static struct PyGetSetDef THPIInfo_properties[] = {
     {"bits", (getter)THPDTypeInfo_bits, nullptr, nullptr, nullptr},
     {"max", (getter)THPIInfo_max, nullptr, nullptr, nullptr},
@@ -274,12 +334,14 @@ static struct PyGetSetDef THPIInfo_properties[] = {
     {"dtype", (getter)THPIInfo_dtype, nullptr, nullptr, nullptr},
     {nullptr}};
 
+// NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables,cppcoreguidelines-avoid-c-arrays)
 static PyMethodDef THPIInfo_methods[] = {
     {nullptr} /* Sentinel */
 };
 
 PyTypeObject THPIInfoType = {
-    PyVarObject_HEAD_INIT(nullptr, 0) "torch.iinfo", /* tp_name */
+    PyVarObject_HEAD_INIT(nullptr, 0)
+    "torch.iinfo", /* tp_name */
     sizeof(THPIInfo), /* tp_basicsize */
     0, /* tp_itemsize */
     nullptr, /* tp_dealloc */

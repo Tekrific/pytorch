@@ -9,15 +9,15 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import textwrap
 from typing import (
-    cast, Any, Callable, DefaultDict, Dict, Generator, List, NamedTuple,
+    cast, Any, Callable, DefaultDict, Dict, Iterator, List, NamedTuple,
     Optional, Tuple, Union, TYPE_CHECKING)
 
 import torch
 from torch.utils.benchmark.utils import common, cpp_jit
 from torch.utils.benchmark.utils._stubs import CallgrindModuleType
+import operator
 
 
 __all__ = ["FunctionCount", "FunctionCounts", "CallgrindStats", "CopyIfCallgrind"]
@@ -29,11 +29,14 @@ else:
     CompletedProcessType = subprocess.CompletedProcess
 
 
-FunctionCount = NamedTuple("FunctionCount", [("count", int), ("function", str)])
+class FunctionCount(NamedTuple):
+    # TODO(#105471): Rename the count field
+    count: int  # type: ignore[assignment]
+    function: str
 
 
 @dataclasses.dataclass(repr=False, eq=False, frozen=True)
-class FunctionCounts(object):
+class FunctionCounts:
     """Container for manipulating Callgrind results.
 
     It supports:
@@ -52,14 +55,13 @@ class FunctionCounts(object):
     # the print settings. This is simply to allow hermetic unit tests.
     _linewidth: Optional[int] = None
 
-    def __iter__(self) -> Generator[FunctionCount, None, None]:
-        for i in self._data:
-            yield i
+    def __iter__(self) -> Iterator[FunctionCount]:
+        yield from self._data
 
     def __len__(self) -> int:
         return len(self._data)
 
-    def __getitem__(self, item: Any) -> "Union[FunctionCount, FunctionCounts]":
+    def __getitem__(self, item: Any) -> Union[FunctionCount, "FunctionCounts"]:
         data: Union[FunctionCount, Tuple[FunctionCount, ...]] = self._data[item]
         return (
             FunctionCounts(cast(Tuple[FunctionCount, ...], data), self.inclusive, truncate_rows=False)
@@ -91,15 +93,15 @@ class FunctionCounts(object):
 
     def __add__(
         self,
-        other,  # type: FunctionCounts
+        other: "FunctionCounts",
     ) -> "FunctionCounts":
         return self._merge(other, lambda c: c)
 
     def __sub__(
         self,
-        other,  # type: FunctionCounts
+        other: "FunctionCounts",
     ) -> "FunctionCounts":
-        return self._merge(other, lambda c: -c)
+        return self._merge(other, operator.neg)
 
     def __mul__(self, other: Union[int, float]) -> "FunctionCounts":
         return self._from_dict({
@@ -138,7 +140,7 @@ class FunctionCounts(object):
 
     def _merge(
         self,
-        second,   # type: FunctionCounts
+        second: "FunctionCounts",
         merge_fn: Callable[[int], int]
     ) -> "FunctionCounts":
         assert self.inclusive == second.inclusive, "Cannot merge inclusive and exclusive counts."
@@ -158,7 +160,7 @@ class FunctionCounts(object):
 
 
 @dataclasses.dataclass(repr=False, eq=False, frozen=True)
-class CallgrindStats(object):
+class CallgrindStats:
     """Top level container for Callgrind results collected by Timer.
 
     Manipulation is generally done using the FunctionCounts class, which is
@@ -210,7 +212,7 @@ class CallgrindStats(object):
     def counts(self, *, denoise: bool = False) -> int:
         """Returns the total number of instructions executed.
 
-        See `FunctionCounts.denoise()` for an explation of the `denoise` arg.
+        See `FunctionCounts.denoise()` for an explanation of the `denoise` arg.
         """
         stats = self.stmt_exclusive_stats
         return (stats.denoise() if denoise else stats).sum()
@@ -218,7 +220,7 @@ class CallgrindStats(object):
     # FIXME: Once 3.7 is the minimum version, type annotate `other` per PEP 563
     def delta(
         self,
-        other,  # type: CallgrindStats
+        other: "CallgrindStats",
         inclusive: bool = False,
     ) -> FunctionCounts:
         """Diff two sets of counts.
@@ -252,7 +254,7 @@ class CallgrindStats(object):
             -23234231 /tmp/second_build_dir/thing.c:foo(...)
 
         Stripping prefixes can ameliorate this issue by regularizing the
-        strings and causing better cancellation of equivilent call sites
+        strings and causing better cancellation of equivalent call sites
         when diffing.
         """
         def strip(stats: FunctionCounts) -> FunctionCounts:
@@ -463,7 +465,7 @@ class GlobalsBridge:
                 path = os.path.join(self._data_dir, f"{name}.pt")
                 load_lines.append(f"{name} = torch.jit.load({repr(path)})")
                 with open(path, "wb") as f:
-                    torch.jit.save(wrapped_value.value, f)
+                    torch.jit.save(wrapped_value.value, f)  # type: ignore[no-untyped-call]
 
             else:
                 raise NotImplementedError(
@@ -472,7 +474,7 @@ class GlobalsBridge:
         return "\n".join(load_lines)
 
 
-class _ValgrindWrapper(object):
+class _ValgrindWrapper:
     def __init__(self) -> None:
         self._bindings_module: Optional[CallgrindModuleType] = None
         valgrind_symbols = (
@@ -495,12 +497,12 @@ class _ValgrindWrapper(object):
             for cmd in ("valgrind", "callgrind_control", "callgrind_annotate"):
                 self._commands_available[cmd] = not subprocess.run(
                     ["which", cmd],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    capture_output=True,
+                    check=False,
                 ).returncode
 
         self._build_type: Optional[str] = None
-        build_search = re.search("BUILD_TYPE=(.+),", torch.__config__.show())
+        build_search = re.search("BUILD_TYPE=(.+),", torch.__config__.show())  # type: ignore[no-untyped-call]
         if build_search is not None:
             self._build_type = build_search.groups()[0].split(",")[0]
 
@@ -583,7 +585,7 @@ class _ValgrindWrapper(object):
         3) Parse the run results.
         4) Cleanup the scratch directory.
         """
-        working_dir = tempfile.mkdtemp()
+        working_dir = common._make_temp_dir(prefix="callgrind")
         data_dir = os.path.join(working_dir, "data")
         script_file = os.path.join(working_dir, "timer_callgrind.py")
         callgrind_out = os.path.join(working_dir, "callgrind.out")
@@ -601,7 +603,7 @@ class _ValgrindWrapper(object):
                     stderr=subprocess.STDOUT,
                     **kwargs,
                 )
-                with open(stdout_stderr_log, "rt") as f:
+                with open(stdout_stderr_log) as f:
                     return invocation, f.read()
             finally:
                 f_stdout_stderr.close()
@@ -615,7 +617,7 @@ class _ValgrindWrapper(object):
                     )
 
                 script_file = os.path.join(working_dir, "timer_callgrind.py")
-                with open(script_file, "wt") as f:
+                with open(script_file, "w") as f:
                     f.write(self._construct_script(
                         task_spec,
                         globals=GlobalsBridge(globals, data_dir),
@@ -637,9 +639,9 @@ class _ValgrindWrapper(object):
                 run_loop_cmd = [
                     run_loop_exec,
                     "--number", str(number),
-                    "--number_warmup", str(min(number, 10)),
+                    "--number-warmup", str(min(number, 10)),
                     "--repeats", str(repeats),
-                    "--number_threads", str(task_spec.num_threads),
+                    "--number-threads", str(task_spec.num_threads),
                 ]
 
             valgrind_invocation, valgrind_invocation_output = run([
@@ -655,7 +657,7 @@ class _ValgrindWrapper(object):
             if valgrind_invocation.returncode:
                 error_report = ""
                 if os.path.exists(error_log):
-                    with open(error_log, "rt") as f:
+                    with open(error_log) as f:
                         error_report = f.read()
                 if not error_report:
                     error_report = "Unknown error.\n" + valgrind_invocation_output
@@ -699,7 +701,7 @@ class _ValgrindWrapper(object):
                         if fn_match:
                             ir_str, file_function = fn_match.groups()
                             ir = int(ir_str.replace(",", ""))
-                            if ir == program_totals:
+                            if ir == program_totals:  # type: ignore[possibly-undefined]
                                 # Callgrind includes some top level red herring symbols when
                                 # a program dumps multiple profiles.
                                 continue
@@ -727,7 +729,7 @@ class _ValgrindWrapper(object):
                 fpath = f"{callgrind_out}.{i + 1}"  # Callgrind one-indexes files.
                 callgrind_out_contents: Optional[str] = None
                 if retain_out_file:
-                    with open(fpath, "rt") as f:
+                    with open(fpath) as f:
                         callgrind_out_contents = f.read()
 
                 return (
@@ -821,10 +823,10 @@ class _ValgrindWrapper(object):
             # =============================================================================
             # == Check that subprocess matches parent =====================================
             # =============================================================================
-            if sys.executable != "{parent_interpreter}":
+            if os.path.realpath(sys.executable) != "{parent_interpreter}":
                 log_failure(
                     "Interpreter mismatch:\n"
-                    f"  {{sys.executable}}\n    vs.\n  {parent_interpreter}"
+                    f"  {{os.path.realpath(sys.executable)}}\n    vs.\n  {parent_interpreter}"
                 )
 
             if torch.__file__ != "{torch_file}":
@@ -889,7 +891,7 @@ class _ValgrindWrapper(object):
             num_threads=task_spec.num_threads,
             error_log_repr=repr(error_log),
             stat_log=stat_log,
-            parent_interpreter=sys.executable,
+            parent_interpreter=os.path.realpath(sys.executable),
             torch_file=torch.__file__,
             bindings_import=(
                 "import torch._C as callgrind_bindings" if bindings is None

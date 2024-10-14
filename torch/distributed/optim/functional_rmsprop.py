@@ -1,8 +1,13 @@
-from typing import List, Dict, Optional
+# mypy: allow-untyped-defs
+from typing import Dict, List, Optional
+
 import torch
 import torch.optim._functional as F
-
 from torch import Tensor
+
+
+__all__: List[str] = []
+
 
 # Define a TorchScript compatible Functional RMSprop Optimizer
 # where we use these optimizer in a functional way.
@@ -14,7 +19,7 @@ from torch import Tensor
 # NOTE: This should be only used by distributed optimizer internals
 # and not meant to expose to the user.
 @torch.jit.script
-class _FunctionalRMSprop(object):
+class _FunctionalRMSprop:
     def __init__(
         self,
         params: List[Tensor],
@@ -23,7 +28,10 @@ class _FunctionalRMSprop(object):
         eps: float = 1e-8,
         weight_decay: float = 0.0,
         momentum: float = 0.0,
-        centered: bool = False
+        centered: bool = False,
+        foreach: bool = False,
+        maximize: bool = False,
+        _allow_empty_param_list: bool = False,
     ):
         self.defaults = {
             "lr": lr,
@@ -33,8 +41,10 @@ class _FunctionalRMSprop(object):
             "momentum": momentum,
         }
         self.centered = centered
+        self.foreach = foreach
+        self.maximize = maximize
 
-        if len(params) == 0:
+        if len(params) == 0 and not _allow_empty_param_list:
             raise ValueError("optimizer got an empty parameter list")
 
         # NOTE: we only have one param_group and don't allow user to add additional
@@ -44,16 +54,18 @@ class _FunctionalRMSprop(object):
         self.state = torch.jit.annotate(Dict[torch.Tensor, Dict[str, torch.Tensor]], {})
 
     def step(self, gradients: List[Optional[Tensor]]):
-        params = self.param_group['params']
+        params = self.param_group["params"]
+        params_with_grad = []
         grads = []
         square_avgs = []
         grad_avgs = []
         momentum_buffer_list = []
-        lr = self.defaults['lr']
-        alpha = self.defaults['alpha']
-        eps = self.defaults['eps']
-        momentum = self.defaults['momentum']
-        weight_decay = self.defaults['weight_decay']
+        state_steps = []
+        lr = self.defaults["lr"]
+        alpha = self.defaults["alpha"]
+        eps = self.defaults["eps"]
+        momentum = self.defaults["momentum"]
+        weight_decay = self.defaults["weight_decay"]
 
         if len(params) != len(gradients):
             raise ValueError(
@@ -62,38 +74,53 @@ class _FunctionalRMSprop(object):
                 + f"Gradients length: {len(gradients)}"
             )
 
+        has_complex = False
         for param, gradient in zip(params, gradients):
             if gradient is not None:
+                has_complex |= torch.is_complex(param)
+                params_with_grad.append(param)
                 grads.append(gradient)
                 # Lazy state initialization
                 if param not in self.state:
                     self.state[param] = {}
                     state = self.state[param]
-                    state['step'] = torch.tensor(0.0)
-                    state['square_avg'] = torch.zeros_like(param, memory_format=torch.preserve_format)
+                    state["step"] = torch.tensor(0.0)
+                    state["square_avg"] = torch.zeros_like(
+                        param, memory_format=torch.preserve_format
+                    )
                     if momentum > 0:
-                        state['momentum_buffer'] = torch.zeros_like(param, memory_format=torch.preserve_format)
+                        state["momentum_buffer"] = torch.zeros_like(
+                            param, memory_format=torch.preserve_format
+                        )
                     if self.centered:
-                        state['grad_avg'] = torch.zeros_like(param, memory_format=torch.preserve_format)
+                        state["grad_avg"] = torch.zeros_like(
+                            param, memory_format=torch.preserve_format
+                        )
 
                 state = self.state[param]
-                square_avgs.append(state['square_avg'])
+                square_avgs.append(state["square_avg"])
                 if momentum > 0:
-                    momentum_buffer_list.append(state['momentum_buffer'])
+                    momentum_buffer_list.append(state["momentum_buffer"])
                 if self.centered:
-                    grad_avgs.append(state['grad_avg'])
+                    grad_avgs.append(state["grad_avg"])
 
-                state['step'] += 1
+                state_steps.append(state["step"])
 
         with torch.no_grad():
-            F.rmsprop(params,
-                      grads,
-                      square_avgs,
-                      grad_avgs,
-                      momentum_buffer_list,
-                      lr,
-                      alpha,
-                      eps,
-                      weight_decay,
-                      momentum,
-                      self.centered)
+            F.rmsprop(
+                params_with_grad,
+                grads,
+                square_avgs,
+                grad_avgs,
+                momentum_buffer_list,
+                state_steps,
+                lr=lr,
+                alpha=alpha,
+                eps=eps,
+                weight_decay=weight_decay,
+                momentum=momentum,
+                centered=self.centered,
+                foreach=self.foreach,
+                maximize=self.maximize,
+                has_complex=has_complex,
+            )

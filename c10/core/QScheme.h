@@ -1,7 +1,8 @@
 #pragma once
 
-#include <c10/core/DeviceType.h>
 #include <c10/util/Exception.h>
+#include <cstdint>
+#include <string>
 
 namespace c10 {
 
@@ -24,12 +25,13 @@ constexpr auto kPerTensorAffine = QScheme::PER_TENSOR_AFFINE;
 constexpr auto kPerChannelAffine = QScheme::PER_CHANNEL_AFFINE;
 constexpr auto kPerTensorSymmetric = QScheme::PER_TENSOR_SYMMETRIC;
 constexpr auto kPerChannelSymmetric = QScheme::PER_CHANNEL_SYMMETRIC;
-constexpr auto kPerChannelAffineFloatQParams = QScheme::PER_CHANNEL_AFFINE_FLOAT_QPARAMS;
+constexpr auto kPerChannelAffineFloatQParams =
+    QScheme::PER_CHANNEL_AFFINE_FLOAT_QPARAMS;
 constexpr int COMPILE_TIME_NUM_QSCHEMES =
-  static_cast<int>(QScheme::COMPILE_TIME_NUM_QSCHEMES);
+    static_cast<int>(QScheme::COMPILE_TIME_NUM_QSCHEMES);
 
 inline std::string toString(QScheme qscheme) {
-  switch(qscheme) {
+  switch (qscheme) {
     case kPerTensorAffine:
       return "per_tensor_affine";
     case kPerChannelAffine:

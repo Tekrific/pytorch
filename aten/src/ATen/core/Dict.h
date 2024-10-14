@@ -1,19 +1,19 @@
 #pragma once
 
 #include <c10/macros/Macros.h>
+#include <c10/macros/Export.h>
 #include <c10/util/TypeTraits.h>
 #include <c10/util/TypeList.h>
 #include <c10/util/intrusive_ptr.h>
 #include <c10/util/order_preserving_flat_hash_map.h>
-#include <c10/util/Optional.h>
-#include <torch/csrc/WindowsTorchApiMacro.h>
+#include <optional>
 #include <ATen/core/TensorBody.h>
+#include <ATen/core/jit_type_base.h>
 
 namespace c10 {
 struct IValue;
 template<class Key, class Value> class Dict;
 struct Type;
-using TypePtr = std::shared_ptr<Type>;
 
 namespace impl {
 
@@ -70,11 +70,11 @@ public:
   explicit DictEntryRef(Iterator iterator)
   : iterator_(std::move(iterator)) {}
 
-  Key key() const {
+  decltype(auto) key() const {
     return iterator_->first.template to<Key>();
   }
 
-  Value value() const {
+  decltype(auto) value() const {
     return iterator_->second.template to<Value>();
   }
 
@@ -101,8 +101,15 @@ private:
 // this wraps map_type::iterator to make sure user code can't rely
 // on it being the type of the underlying map.
 template<class Key, class Value, class Iterator>
-class DictIterator final : public std::iterator<std::forward_iterator_tag, DictEntryRef<Key, Value, Iterator>> {
+class DictIterator final {
 public:
+   // C++17 friendly std::iterator implementation
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = DictEntryRef<Key, Value, Iterator>;
+  using difference_type = std::ptrdiff_t;
+  using pointer = value_type*;
+  using reference = value_type&;
+
   explicit DictIterator() = default;
   ~DictIterator() = default;
 
@@ -136,7 +143,7 @@ public:
     return &entryRef_;
   }
 
-  friend typename std::iterator<std::random_access_iterator_tag, DictEntryRef<Key, Value, Iterator>>::difference_type operator-(const DictIterator& lhs, const DictIterator& rhs) {
+  friend difference_type operator-(const DictIterator& lhs, const DictIterator& rhs) {
     return lhs.entryRef_.iterator_ - rhs.entryRef_.iterator_;
   }
 
@@ -200,7 +207,7 @@ template<class Key, class Value> Dict<IValue, IValue> toGenericDict(Dict<Key, Va
 template<class Key, class Value>
 class Dict final {
 private:
-  static_assert((std::is_same<IValue, Key>::value && std::is_same<IValue, Value>::value) || guts::typelist::contains<impl::valid_dict_key_types, Key>::value, "Invalid Key type for Dict. We only support int64_t, double, bool, and string.");
+  static_assert((std::is_same_v<IValue, Key> && std::is_same_v<IValue, Value>) || guts::typelist::contains<impl::valid_dict_key_types, Key>::value, "Invalid Key type for Dict. We only support int64_t, double, bool, and string.");
 
   // impl_ stores the underlying map as a ska_ordered::order_preserving_flat_hash_map.
   // We intentionally don't offer conversion from/to
@@ -239,8 +246,6 @@ public:
 
   Dict(const Dict&) = default;
   Dict& operator=(const Dict&) = default;
-  Dict(Dict&&) noexcept;
-  Dict& operator=(Dict&&) noexcept;
 
   /**
    * Create a new Dict pointing to a deep copy of the same data.
@@ -359,7 +364,7 @@ public:
   bool is(const Dict& rhs) const;
 
   // private API for now because the return type will change to TypePtr
-  // instead of optional<TypePtr> once types are mandatory.
+  // instead of std::optional<TypePtr> once types are mandatory.
   TypePtr keyType() const;
   TypePtr valueType() const;
 
@@ -389,4 +394,4 @@ namespace torch {
   template<class Key, class Value> using Dict = c10::Dict<Key, Value>;
 }
 
-#include <ATen/core/Dict_inl.h>
+#include <ATen/core/Dict_inl.h>  // IWYU pragma: keep

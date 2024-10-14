@@ -1,3 +1,5 @@
+# Owner(s): ["oncall: jit"]
+
 import unittest
 import os
 import sys
@@ -5,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing import FileCheck
+from unittest import skipIf
 
 from torch.testing._internal.common_utils import run_tests, IS_SANDCASTLE, ProfilingMode, GRAPH_EXECUTOR, \
     enable_profiling_mode_for_profiling_tests, IS_WINDOWS, TemporaryDirectoryName, shell
@@ -23,7 +26,7 @@ if GRAPH_EXECUTOR == ProfilingMode.PROFILING:
 
 
 def strip_profiling_nodes(nodes):
-    profiling_opcodes = set(['prim::BailoutTemplate', 'prim::BailOut'])
+    profiling_opcodes = {'prim::BailoutTemplate', 'prim::BailOut'}
     return [n for n in nodes if n.kind() not in profiling_opcodes]
 
 
@@ -35,6 +38,7 @@ def warmup_forward(f, *args):
     return results
 
 
+@skipIf(GRAPH_EXECUTOR == ProfilingMode.LEGACY, "skip due to SIGIOT failures, #67646")
 class TestFuser(JitTestCase):
     def assertAllFused(self, graph, except_for=()):
 
@@ -46,7 +50,7 @@ class TestFuser(JitTestCase):
         allowed_nodes = {'prim::Constant', 'prim::FusionGroup', 'prim::BailoutTemplate',
                          'prim::BailOut', 'prim::TupleConstruct'} | set(except_for)
         self.assertTrue(all(node.kind() in allowed_nodes for node in graph.nodes()),
-                        'got {}'.format(graph))
+                        f'got {graph}')
         self.assertTrue([node.kind() for node in graph.nodes()].count('prim::FusionGroup') == 1)
 
     def _test_fused_abs(self, device='cpu'):
@@ -66,11 +70,11 @@ class TestFuser(JitTestCase):
     @unittest.skipIf(IS_SANDCASTLE, "NYI: fuser CPU support for Sandcastle")
     @enable_cpu_fuser
     def test_abs_cpu_unicode_temp_dir(self):
-        with TemporaryDirectoryName(suffix='中文') as dname:
+        with TemporaryDirectoryName(suffix='\u4e2d\u6587') as dname:
             shell_env = os.environ.copy()
             shell_env['TMP'] = dname
             cmd = [sys.executable, os.path.basename(__file__), type(self).__name__ + '.test_abs_cpu']
-            legacy_jit_flag = '--jit_executor=legacy'
+            legacy_jit_flag = '--jit-executor=legacy'
             for v in sys.argv:
                 if v == legacy_jit_flag:
                     cmd.append(legacy_jit_flag)
@@ -507,7 +511,7 @@ class TestFuser(JitTestCase):
     def test_fuse_decompose_normalization(self):
         class ResLike(torch.jit.ScriptModule):
             def __init__(self, norm_module):
-                super(ResLike, self).__init__()
+                super().__init__()
                 self.nm = norm_module
 
             @torch.jit.script_method
@@ -792,7 +796,7 @@ class TestFuser(JitTestCase):
             FileCheck.check("FusionGroup").run(str(graph))
         except RuntimeError as e:
             if 'Failed to compile' in e.args[0]:
-                warnings.warn('CPU fuser test has failed! This is not a hard failure, '
+                warnings.warn('CPU fuser test has failed! This is not a hard failure, '  # noqa: F821
                               'because the kernels sometimes trigger bugs in compilers '
                               '(most notably GCC 7.2).')
                 raise unittest.SkipTest('Failed to compile') from e
@@ -817,8 +821,8 @@ class TestFuser(JitTestCase):
         class M(torch.jit.ScriptModule):
             __constants__ = ['d']
 
-            def __init__(self):
-                super(M, self).__init__()
+            def __init__(self) -> None:
+                super().__init__()
                 self.d = torch.device('cuda')
 
             @torch.jit.script_method

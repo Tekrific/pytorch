@@ -7,8 +7,7 @@
 
 #include <unordered_map>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 namespace {
 
 struct CommonSubexpressionEliminator {
@@ -27,6 +26,14 @@ struct CommonSubexpressionEliminator {
     bool changed = false;
     for (auto it = block->nodes().begin(); it != block->nodes().end(); ++it) {
       auto node = *it;
+
+      if (node->kind() == prim::profile) {
+        GRAPH_DEBUG(
+            "Profiled nodes shouldn't be CSE'ed there's a separate pass that does dedup and merging:\n",
+            *node);
+        continue;
+      }
+
       if (node->hasSideEffects()) {
         GRAPH_DEBUG("Node was skipped due to side effects:\n", *node);
         continue;
@@ -118,5 +125,4 @@ bool EliminateCommonSubexpression(const std::shared_ptr<Graph>& graph) {
   CommonSubexpressionEliminator cse(graph);
   return cse.run([](Node*) { return nullptr; });
 }
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit
